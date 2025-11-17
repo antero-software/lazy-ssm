@@ -1,0 +1,26 @@
+# Binaries
+lazy-ssm
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+
+# Configuration files (may contain sensitive data)
+config.yaml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

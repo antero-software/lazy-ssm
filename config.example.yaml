@@ -1,0 +1,64 @@
+app:
+  log_level: info  # Options: debug, info, warn, error
+
+# AWS configuration
+aws:
+  profile: ""      # AWS profile to use (leave empty for default)
+  region: ""       # AWS region (leave empty for default)
+  cli_path: aws    # Path to AWS CLI executable
+
+# Timeout configuration
+timeouts:
+  tunnel_ready: 15s          # Maximum wait time for tunnel to become ready
+  tunnel_ready_poll: 500ms   # How often to check if tunnel is ready
+  idle_check: 30s            # How often to check for idle tunnels
+  idle_timeout: 5m           # Close tunnel after this much inactivity
+  shutdown: 10s              # Maximum time to wait for graceful shutdown
+  shutdown_poll: 100ms       # How often to check during shutdown
+  connection: 1s             # TCP connection timeout for health checks
+
+# Network configuration
+network:
+  listen_address: localhost  # Address to bind listeners to
+  tunnel_port_offset: 10000  # Offset added to local_port for SSM tunnel port
+
+# Tunnel definitions
+tunnels:
+  # Example: Production MySQL Database (using explicit instance ID)
+  - name: production-db
+    local_port: 3306                # Port to listen on locally
+    rds_endpoint: prod-db.cluster-xxxxx.us-east-1.rds.amazonaws.com
+    rds_port: 3306                  # Port on the RDS instance
+    instance_id: i-xxxxx            # Explicit EC2 bastion instance ID
+    description: "Production DB"    # Human-readable description
+    aws_profile: production         # Optional: Override AWS profile for this tunnel
+    aws_region: us-east-1           # Optional: Override AWS region for this tunnel
+
+  # Example: Staging MySQL Database (using instance pattern)
+  - name: staging-db
+    local_port: 3307
+    rds_endpoint: staging-db.cluster-xxxxx.us-east-1.rds.amazonaws.com
+    rds_port: 3306
+    instance_pattern: bastion-staging-*  # Auto-discover instance by name pattern
+    description: "Staging DB"
+    aws_profile: staging
+
+  # Example: PostgreSQL Database (using wildcard pattern for auto-scaling group)
+  - name: postgres-db
+    local_port: 5432
+    rds_endpoint: postgres-db.cluster-xxxxx.eu-west-1.rds.amazonaws.com
+    rds_port: 5432
+    instance_pattern: app-server-*  # Matches any instance with name starting with "app-server-"
+    description: "PostgreSQL DB"
+    aws_profile: customer-account
+    aws_region: eu-west-1
+
+# Notes:
+# - Replace xxxxx with your actual AWS resource IDs
+# - Ensure the EC2 bastion instances have SSM agent installed
+# - The AWS CLI must be configured with appropriate credentials
+# - Local ports must be >= 1024 (unless running as root)
+# - Each tunnel must have a unique local_port
+# - Per-tunnel aws_profile and aws_region override global AWS settings
+# - Use either instance_id (explicit) or instance_pattern (auto-discovery), not both
+# - Instance patterns use EC2 instance Name tag for matching (supports wildcards)
