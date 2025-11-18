@@ -17,6 +17,10 @@ import (
 	"github.com/antero-software/lazy-ssm/sso"
 )
 
+const (
+	maxPortAttempts = 100 // Maximum number of ports to try
+)
+
 // LazySSMTunnel manages an on-demand SSM tunnel
 type LazySSMTunnel struct {
 	config         config.TunnelConfig
@@ -27,6 +31,24 @@ type LazySSMTunnel struct {
 	lastActivity   atomic.Int64
 	connections    atomic.Int32
 	resolvedInstID string // Cached resolved instance ID from pattern
+}
+
+// findFreePort attempts to find a free port starting from the specified port
+func findFreePort(listenAddr string, startPort int) (int, error) {
+	for i := 0; i < maxPortAttempts; i++ {
+		port := startPort + i
+		addr := fmt.Sprintf("%s:%d", listenAddr, port)
+
+		// Try to listen on the port
+		listener, err := net.Listen("tcp", addr)
+		if err == nil {
+			// Port is free, close the listener and return the port
+			listener.Close()
+			return port, nil
+		}
+	}
+
+	return 0, fmt.Errorf("could not find free port in range %d-%d", startPort, startPort+maxPortAttempts-1)
 }
 
 // NewLazySSMTunnel creates a new tunnel manager
@@ -91,6 +113,18 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 		if err := t.tunnelCmd.Process.Signal(os.Signal(nil)); err == nil {
 			return nil // Tunnel is still running
 		}
+	}
+
+	// Find a free port for the tunnel, starting from the preferred port
+	freePort, err := findFreePort(t.appConfig.Network.ListenAddress, t.tunnelPort)
+	if err != nil {
+		return fmt.Errorf("failed to find free port: %w", err)
+	}
+
+	// Update tunnel port if it changed
+	if freePort != t.tunnelPort {
+		log.Printf("[%s] Port %d in use, using port %d instead", t.config.Description, t.tunnelPort, freePort)
+		t.tunnelPort = freePort
 	}
 
 	log.Printf("[%s] Starting SSM tunnel on port %d...", t.config.Description, t.tunnelPort)

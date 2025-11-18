@@ -8,7 +8,7 @@ import (
 	"syscall"
 
 	"github.com/antero-software/lazy-ssm/config"
-	"github.com/antero-sofware/lazy-ssm/tunnel"
+	"github.com/antero-software/lazy-ssm/tunnel"
 	"github.com/spf13/cobra"
 )
 
