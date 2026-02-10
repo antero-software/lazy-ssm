@@ -7,10 +7,13 @@ On-demand AWS Systems Manager tunnels to RDS databases through EC2 bastion insta
 - **On-Demand Tunnels**: Automatically start SSM tunnels when connections are detected
 - **Automatic Cleanup**: Close idle tunnels after configurable timeout periods
 - **Multiple Databases**: Manage multiple database tunnels simultaneously
-- **Configuration-Based**: YAML configuration with validation
-- **AWS Integration**: Support for AWS profiles and regions with automatic SSO login
+- **Daemon Mode**: Run as a background service with `start`, `stop`, `restart`, `status` commands
+- **Hot Reload**: Update tunnel configuration without restarting the daemon via `reload`
+- **Multi-Account Support**: Per-tunnel AWS profile and region overrides for cross-account setups
 - **Instance Auto-Discovery**: Use wildcard patterns to find EC2 instances dynamically
 - **SSO Authentication**: Automatic detection and browser-based login for AWS SSO profiles
+- **Connection Monitoring**: Real-time active connection tracking per tunnel via `status`
+- **Configuration Validation**: Comprehensive startup validation with clear error messages
 - **Graceful Shutdown**: Clean termination of all tunnels on exit
 
 ## Prerequisites
@@ -345,21 +348,38 @@ mysql -h localhost -P 3306 -u username -p
 
 ```
 lazy-ssm/
-├── main.go              # Application entry point with Cobra CLI
+├── main.go                          # Application entry point
+├── cmd/
+│   ├── root.go                      # Root command, CLI flags, and tunnel manager startup
+│   ├── start.go                     # Start command with daemon/foreground modes
+│   ├── stop.go                      # Graceful daemon shutdown
+│   ├── restart.go                   # Daemon restart (stop + start)
+│   ├── reload.go                    # Hot configuration reload
+│   ├── status.go                    # Daemon and tunnel status reporting
+│   └── version.go                   # Version command (set via ldflags at build time)
 ├── config/
-│   ├── config.go        # Configuration loading with Viper
-│   └── validation.go    # Configuration validation
+│   ├── config.go                    # Configuration loading with Viper
+│   └── validation.go               # Configuration validation rules
 ├── tunnel/
-│   ├── tunnel.go        # LazySSMTunnel implementation
-│   └── manager.go       # TunnelManager coordination
+│   ├── tunnel.go                    # LazySSMTunnel implementation and connection proxying
+│   └── manager.go                   # TunnelManager coordination and lifecycle
+├── daemon/
+│   └── daemon.go                    # Daemon process management (PID file, Unix socket IPC)
 ├── ec2/
-│   └── discovery.go     # EC2 instance discovery by pattern
+│   └── discovery.go                 # EC2 instance discovery by Name tag pattern
 ├── sso/
-│   └── auth.go          # AWS SSO authentication handling
-├── config.yaml          # Your configuration (gitignored)
-├── config.example.yaml  # Example configuration template
-├── go.mod               # Go module definition
-└── README.md            # This file
+│   └── auth.go                      # AWS SSO authentication handling
+├── docs/
+│   └── configuration-guide.md       # Detailed configuration reference
+├── .github/
+│   └── workflows/
+│       └── release.yml              # CI/CD release workflow
+├── config.yaml                      # Your configuration (gitignored)
+├── config.example.yaml              # Example configuration template
+├── go.mod                           # Go module definition
+├── ARCHITECTURE.md                  # System design documentation
+├── SERVICE.md                       # Daemon mode documentation
+└── README.md                        # This file
 ```
 
 ## Security Considerations
