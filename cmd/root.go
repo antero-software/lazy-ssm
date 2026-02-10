@@ -50,6 +50,7 @@ func init() {
 	RootCmd.AddCommand(restartCmd)
 	RootCmd.AddCommand(reloadCmd)
 	RootCmd.AddCommand(statusCmd)
+	RootCmd.AddCommand(versionCmd)
 }
 
 // runTunnelManager is the main function that runs the tunnel manager
