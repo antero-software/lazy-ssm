@@ -369,12 +369,9 @@ lazy-ssm/
 │   └── discovery.go                 # EC2 instance discovery by Name tag pattern
 ├── sso/
 │   └── auth.go                      # AWS SSO authentication handling
-├── docs/
-│   └── configuration-guide.md       # Detailed configuration reference
 ├── .github/
 │   └── workflows/
 │       └── release.yml              # CI/CD release workflow
-├── config.yaml                      # Your configuration (gitignored)
 ├── config.example.yaml              # Example configuration template
 ├── go.mod                           # Go module definition
 ├── ARCHITECTURE.md                  # System design documentation
