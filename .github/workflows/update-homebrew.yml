@@ -1,0 +1,66 @@
+name: Update Homebrew Formula
+
+on:
+  workflow_run:
+    workflows: ["Release Binaries"]
+    types:
+      - completed
+
+jobs:
+  update-formula:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Exit if build failed
+        if: ${{ github.event.workflow_run.conclusion != 'success' }}
+        run: exit 1
+
+      - name: Checkout homebrew tap repo
+        uses: actions/checkout@v3
+        with:
+          repository: antero-software/homebrew-lazy-ssm
+          token: ${{ secrets.GH_PAT }}
+          path: homebrew-tap
+
+      - name: Get tag from triggering commit
+        run: |
+          SHA=${{ github.event.workflow_run.head_sha }}
+          TAG_NAME=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            https://api.github.com/repos/${{ github.repository }}/releases | \
+            jq -r '.[] | select(.target_commitish=="'"$SHA"'") | .tag_name' | head -1)
+
+          if [ -z "$TAG_NAME" ]; then
+            echo "❌ Tag not found for SHA $SHA"
+            exit 1
+          fi
+
+          echo "VERSION=$TAG_NAME" >> $GITHUB_ENV
+
+      - name: Download release binaries and compute hashes
+        run: |
+          curl -LO https://github.com/antero-software/lazy-ssm/releases/download/$VERSION/lazy-ssm-darwin-arm64.tar.gz
+          curl -LO https://github.com/antero-software/lazy-ssm/releases/download/$VERSION/lazy-ssm-darwin-amd64.tar.gz
+          echo "ARM_SHA=$(shasum -a 256 lazy-ssm-darwin-arm64.tar.gz | awk '{print $1}')" >> $GITHUB_ENV
+          echo "AMD_SHA=$(shasum -a 256 lazy-ssm-darwin-amd64.tar.gz | awk '{print $1}')" >> $GITHUB_ENV
+
+      - name: Update Formula file
+        run: |
+          cd homebrew-tap/Formula
+
+          # Update version and URLs
+          sed -i "s/version \".*\"/version \"$VERSION\"/" lazy-ssm.rb
+          sed -i "s|download/.*/lazy-ssm-darwin-arm64.tar.gz|download/$VERSION/lazy-ssm-darwin-arm64.tar.gz|" lazy-ssm.rb
+          sed -i "s|download/.*/lazy-ssm-darwin-amd64.tar.gz|download/$VERSION/lazy-ssm-darwin-amd64.tar.gz|" lazy-ssm.rb
+
+          # Update sha256 for each arch individually
+          sed -i "/darwin-arm64.tar.gz/{n;s/sha256 \".*\"/sha256 \"$ARM_SHA\"/;}" lazy-ssm.rb
+          sed -i "/darwin-amd64.tar.gz/{n;s/sha256 \".*\"/sha256 \"$AMD_SHA\"/;}" lazy-ssm.rb
+
+      - name: Commit and push
+        run: |
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/lazy-ssm.rb
+          git commit -m "chore: update formula to $VERSION"
+          git push
