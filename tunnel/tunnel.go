@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -171,14 +173,48 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 
 	// Start new SSM session
 	t.tunnelCmd = exec.Command(t.appConfig.AWS.CLIPath, args...)
-
-	// Capture output for debugging
 	t.tunnelCmd.Stdout = log.Writer()
-	t.tunnelCmd.Stderr = log.Writer()
+
+	// Pipe stderr separately so we can scan it for error messages
+	stderrPipe, pipeErr := t.tunnelCmd.StderrPipe()
+	if pipeErr != nil {
+		return fmt.Errorf("failed to create stderr pipe: %w", pipeErr)
+	}
 
 	if err := t.tunnelCmd.Start(); err != nil {
+		stderrPipe.Close()
 		return fmt.Errorf("failed to start SSM tunnel: %w", err)
 	}
+
+	// Capture the command reference before launching goroutines
+	cmd := t.tunnelCmd
+
+	// exitCh is closed when the process exits, allowing the readiness loop to detect early death
+	exitCh := make(chan struct{})
+
+	// Scan stderr for errors in the background
+	go t.scanTunnelOutput(stderrPipe)
+
+	// Monitor the process for exit; cleans up state and logs helpful diagnostics
+	go func() {
+		waitErr := cmd.Wait()
+		close(exitCh)
+
+		t.mu.Lock()
+		if t.tunnelCmd == cmd {
+			t.tunnelCmd = nil
+			t.resolvedInstID = "" // Re-discover instance on next attempt
+		}
+		t.mu.Unlock()
+
+		if waitErr != nil {
+			log.Printf("[%s] ERROR: SSM tunnel process exited: %v", t.config.Description, waitErr)
+		} else {
+			log.Printf("[%s] SSM tunnel process exited", t.config.Description)
+		}
+		log.Printf("[%s] Hint: verify instance matching '%s' can reach %s:%d",
+			t.config.Description, t.config.InstancePattern, t.config.RDSEndpoint, t.config.RDSPort)
+	}()
 
 	// Wait for tunnel to be ready by checking port availability
 	readyTimeout := t.appConfig.Timeouts.TunnelReady
@@ -188,8 +224,15 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 	log.Printf("[%s] Waiting for SSM tunnel to become ready...", t.config.Description)
 
 	for time.Since(startTime) < readyTimeout {
-		// Check if port is listening by attempting to dial
-		// We close immediately to minimize impact, but this tells us the tunnel is ready
+		// Check for early process exit before polling the port
+		select {
+		case <-exitCh:
+			t.tunnelCmd = nil
+			return fmt.Errorf("SSM tunnel process exited during startup - check that instance matching '%s' exists and can reach %s:%d",
+				t.config.InstancePattern, t.config.RDSEndpoint, t.config.RDSPort)
+		default:
+		}
+
 		conn, err := net.DialTimeout("tcp",
 			fmt.Sprintf("%s:%d", t.appConfig.Network.ListenAddress, t.tunnelPort),
 			t.appConfig.Timeouts.Connection)
@@ -206,15 +249,31 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 		time.Sleep(pollInterval)
 	}
 
-	// If we got here, timeout occurred - check if process actually died
-	if t.tunnelCmd.Process != nil {
-		// Try to signal the process to see if it's still alive
-		if err := t.tunnelCmd.Process.Signal(os.Signal(nil)); err != nil {
-			return fmt.Errorf("SSM tunnel process died during startup")
+	// Timeout - kill the hung process; the exit goroutine will log and clean up
+	cmd.Process.Kill()
+	t.tunnelCmd = nil
+
+	return fmt.Errorf("tunnel failed to become ready after %v - verify instance matching '%s' can reach %s:%d",
+		readyTimeout, t.config.InstancePattern, t.config.RDSEndpoint, t.config.RDSPort)
+}
+
+// scanTunnelOutput reads from the SSM process stderr, logging each line and highlighting
+// lines that contain error patterns so they're easy to spot in logs.
+func (t *LazySSMTunnel) scanTunnelOutput(r io.Reader) {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "error") || strings.Contains(lower, "failed") ||
+			strings.Contains(lower, "unable") || strings.Contains(lower, "cannot") {
+			log.Printf("[%s] SSM ERROR: %s", t.config.Description, line)
+		} else {
+			log.Printf("[%s] SSM: %s", t.config.Description, line)
 		}
 	}
-
-	return fmt.Errorf("tunnel failed to become ready after %v (process still running but port not accepting connections)", readyTimeout)
 }
 
 // handleConnection handles a client connection
