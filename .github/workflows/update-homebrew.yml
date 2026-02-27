@@ -56,6 +56,27 @@ jobs:
           sed -i "/darwin-arm64.tar.gz/{n;s/sha256 \".*\"/sha256 \"$ARM_SHA\"/;}" lazy-ssm.rb
           sed -i "/darwin-amd64.tar.gz/{n;s/sha256 \".*\"/sha256 \"$AMD_SHA\"/;}" lazy-ssm.rb
 
+      - name: Ensure service block is present
+        run: |
+          cd homebrew-tap/Formula
+          if ! grep -q "service do" lazy-ssm.rb; then
+            python3 - <<'EOF'
+content = open("lazy-ssm.rb").read().rstrip("\n")
+service = """
+  service do
+    run [opt_bin/"lazy-ssm"]
+    keep_alive true
+    log_path var/"log/lazy-ssm.log"
+    error_log_path var/"log/lazy-ssm.log"
+    working_dir var
+  end
+"""
+# Insert before the final closing 'end'
+idx = content.rfind("\nend")
+open("lazy-ssm.rb", "w").write(content[:idx] + service + "end\n")
+EOF
+          fi
+
       - name: Commit and push
         run: |
           cd homebrew-tap

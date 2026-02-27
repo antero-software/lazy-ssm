@@ -7,18 +7,13 @@ On-demand AWS Systems Manager tunnels to RDS databases through EC2 bastion insta
 - **On-Demand Tunnels**: Automatically start SSM tunnels when connections are detected
 - **Automatic Cleanup**: Close idle tunnels after configurable timeout periods
 - **Multiple Databases**: Manage multiple database tunnels simultaneously
-- **Daemon Mode**: Run as a background service with `start`, `stop`, `restart`, `status` commands
-- **Hot Reload**: Update tunnel configuration without restarting the daemon via `reload`
 - **Multi-Account Support**: Per-tunnel AWS profile and region overrides for cross-account setups
 - **Instance Auto-Discovery**: Use wildcard patterns to find EC2 instances dynamically
 - **SSO Authentication**: Automatic detection and browser-based login for AWS SSO profiles
-- **Connection Monitoring**: Real-time active connection tracking per tunnel via `status`
-- **Configuration Validation**: Comprehensive startup validation with clear error messages
 - **Graceful Shutdown**: Clean termination of all tunnels on exit
 
 ## Prerequisites
 
-- Go 1.21 or later
 - AWS CLI installed and configured
 - AWS SSM plugin for AWS CLI (`session-manager-plugin`)
 - EC2 instances with SSM agent installed
@@ -26,24 +21,24 @@ On-demand AWS Systems Manager tunnels to RDS databases through EC2 bastion insta
 
 ## Installation
 
+### Homebrew (recommended)
+
+```bash
+brew install antero-software/lazy-ssm/lazy-ssm
+```
+
 ### From Source
 
 ```bash
-git clone https://github.com/jeffory/lazy-ssm.git
+git clone https://github.com/antero-software/lazy-ssm.git
 cd lazy-ssm
 go build
 ```
 
-## Configuration
+## Setup
 
-### Quick Start
+1. Create your configuration file at `~/.lazy-ssm/config.yaml`:
 
-1. Copy the example configuration:
-```bash
-cp config.example.yaml config.yaml
-```
-
-2. Edit `config.yaml` with your AWS resources:
 ```yaml
 tunnels:
   - name: my-database
@@ -54,22 +49,62 @@ tunnels:
     description: "My Database"
 ```
 
-3. Run the tunnel manager:
+2. Start the service:
+
 ```bash
-./lazy-ssm
+brew services start lazy-ssm
 ```
 
-### Configuration File
+3. Connect to your database as normal — the tunnel starts automatically on first connection:
 
-The configuration file (`config.yaml`) supports the following sections:
+```bash
+mysql -h localhost -P 3306 -u username -p
+```
 
-#### Application Settings
+## Running as a Service
+
+lazy-ssm is designed to run as a Homebrew service. It starts automatically on login and restarts if it crashes.
+
+```bash
+brew services start lazy-ssm      # start
+brew services stop lazy-ssm       # stop
+brew services restart lazy-ssm    # restart
+brew services list                 # check status
+```
+
+### Commands
+
+```bash
+lazy-ssm status        # show brew service status
+lazy-ssm tail          # show last 25 log lines
+lazy-ssm tail -n 50    # show last 50 log lines
+lazy-ssm version       # show version
+```
+
+Logs are written to `$(brew --prefix)/var/log/lazy-ssm.log`.
+
+### Foreground Mode
+
+For debugging, run directly in the foreground — logs go to stdout and `Ctrl+C` shuts it down cleanly:
+
+```bash
+lazy-ssm
+lazy-ssm --config /path/to/config.yaml
+```
+
+## Configuration
+
+The configuration file is loaded from `~/.lazy-ssm/config.yaml` by default. You can override this with `--config`.
+
+### Application Settings
+
 ```yaml
 app:
-  log_level: info  # Options: debug, info, warn, error
+  log_level: info  # debug, info, warn, error
 ```
 
-#### AWS Settings
+### AWS Settings
+
 ```yaml
 aws:
   profile: ""      # Global AWS profile (optional, uses default if empty)
@@ -77,9 +112,10 @@ aws:
   cli_path: aws    # Path to AWS CLI executable
 ```
 
-**Note**: Global AWS settings can be overridden per tunnel. See "Per-Tunnel AWS Profiles" below.
+Global AWS settings can be overridden per tunnel.
 
-#### Timeout Settings
+### Timeout Settings
+
 ```yaml
 timeouts:
   tunnel_ready: 15s          # Maximum wait for tunnel to become ready
@@ -91,14 +127,16 @@ timeouts:
   connection: 1s             # TCP connection timeout
 ```
 
-#### Network Settings
+### Network Settings
+
 ```yaml
 network:
   listen_address: localhost  # Address to bind listeners
   tunnel_port_offset: 10000  # Offset for SSM tunnel ports
 ```
 
-#### Tunnel Definitions
+### Tunnel Definitions
+
 ```yaml
 tunnels:
   - name: production-db              # Unique name for this tunnel
@@ -107,33 +145,41 @@ tunnels:
     rds_port: 3306                   # RDS port
     instance_id: i-xxxxx             # EC2 bastion instance (explicit ID)
     description: "Production DB"     # Human-readable description
-    aws_profile: production          # Optional: Override AWS profile for this tunnel
-    aws_region: us-east-1            # Optional: Override AWS region for this tunnel
+    aws_profile: production          # Optional: override AWS profile for this tunnel
+    aws_region: us-east-1            # Optional: override AWS region for this tunnel
 ```
 
-**Note**: Each tunnel requires a unique `local_port`. Ports below 1024 require root privileges.
+Each tunnel requires a unique `local_port`. Ports below 1024 require root privileges.
 
-**Instance Discovery**: You can use either:
-- `instance_id`: Explicit EC2 instance ID (e.g., `i-xxxxx`)
-- `instance_pattern`: Wildcard pattern to auto-discover instances (e.g., `app-server-*`)
+Use either `instance_id` (explicit) or `instance_pattern` (wildcard auto-discovery) — not both.
 
-#### Per-Tunnel AWS Profiles
+### Instance Auto-Discovery
 
-You can specify different AWS profiles and regions for individual tunnels. This is useful when:
-- Managing databases across multiple AWS accounts
-- Working with resources in different regions
-- Using different IAM credentials per environment
-
-Per-tunnel AWS settings take precedence over global settings:
+Use `instance_pattern` to match EC2 instances by their Name tag. Useful for auto-scaling groups where instance IDs change frequently.
 
 ```yaml
-# Global AWS settings (fallback)
+tunnels:
+  - name: staging-db
+    local_port: 3307
+    rds_endpoint: staging-db.cluster-xxxxx.us-east-1.rds.amazonaws.com
+    rds_port: 3306
+    instance_pattern: bastion-staging-*
+    description: "Staging DB"
+```
+
+- Supports `*` wildcards (e.g., `bastion-*`, `*-production`)
+- Only matches running instances with SSM agent installed
+- Requires `ec2:DescribeInstances` IAM permission
+- If multiple instances match, the first one found is used
+
+### Per-Tunnel AWS Profiles
+
+```yaml
 aws:
   profile: default
   region: us-east-1
 
 tunnels:
-  # Uses global settings (default profile, us-east-1)
   - name: dev-db
     local_port: 3306
     rds_endpoint: dev-db.cluster-xxxxx.us-east-1.rds.amazonaws.com
@@ -141,16 +187,6 @@ tunnels:
     instance_id: i-xxxxx
     description: "Dev DB"
 
-  # Override with staging profile
-  - name: staging-db
-    local_port: 3307
-    rds_endpoint: staging-db.cluster-xxxxx.us-east-1.rds.amazonaws.com
-    rds_port: 3306
-    instance_id: i-yyyyy
-    description: "Staging DB"
-    aws_profile: staging
-
-  # Override with different account and region
   - name: customer-db
     local_port: 5432
     rds_endpoint: customer-db.cluster-xxxxx.eu-west-1.rds.amazonaws.com
@@ -161,170 +197,24 @@ tunnels:
     aws_region: eu-west-1
 ```
 
-#### Instance Auto-Discovery
+### AWS SSO Authentication
 
-Instead of specifying an explicit `instance_id`, you can use `instance_pattern` to automatically discover EC2 instances by their Name tag. This is particularly useful for:
-- Auto-scaling groups where instance IDs change frequently
-- Dynamic environments where instances are regularly replaced
-- Managing multiple environments with similar naming conventions
+The tunnel manager automatically detects when a profile requires SSO and handles login for you.
 
-**How it works**:
-1. The pattern matches against the EC2 instance **Name tag**
-2. Supports wildcard matching using `*` (e.g., `bastion-*`, `*-production`, `app-*-server`)
-3. Only considers **running** instances with **SSM agent** installed
-4. Automatically caches the discovered instance ID for the session
-5. Re-discovers if the tunnel needs to restart (e.g., after idle timeout)
+1. Before starting a tunnel, it checks if the profile is authenticated
+2. If credentials are expired, it runs `aws sso login --profile <name>`
+3. Your browser opens to the AWS SSO login page
+4. After login, the tunnel starts automatically
 
-**Examples**:
-
-```yaml
-tunnels:
-  # Using explicit instance ID
-  - name: prod-db
-    local_port: 3306
-    rds_endpoint: prod-db.cluster-xxxxx.us-east-1.rds.amazonaws.com
-    rds_port: 3306
-    instance_id: i-0123456789abcdef0      # Explicit ID
-    description: "Production DB"
-
-  # Using wildcard pattern for auto-scaling group
-  - name: staging-db
-    local_port: 3307
-    rds_endpoint: staging-db.cluster-xxxxx.us-east-1.rds.amazonaws.com
-    rds_port: 3306
-    instance_pattern: bastion-staging-*    # Matches any "bastion-staging-*" instance
-    description: "Staging DB"
-
-  # Using pattern with different AWS profile
-  - name: dev-db
-    local_port: 3308
-    rds_endpoint: dev-db.cluster-xxxxx.us-west-2.rds.amazonaws.com
-    rds_port: 3306
-    instance_pattern: dev-bastion-*
-    description: "Dev DB"
-    aws_profile: development
-    aws_region: us-west-2
-```
-
-**Important**:
-- Cannot use both `instance_id` and `instance_pattern` - choose one
-- Pattern matching requires proper IAM permissions for `ec2:DescribeInstances`
-- If multiple instances match the pattern, the first one found is used
-- The instance must be running and have SSM agent installed
-
-#### AWS SSO Authentication
-
-The tunnel manager automatically detects when AWS profiles require SSO authentication and handles the login process for you.
-
-**How it works**:
-1. Before starting each tunnel, the manager checks if the AWS profile is authenticated
-2. If credentials are expired or missing, it detects whether the profile uses SSO
-3. For SSO profiles, it automatically runs `aws sso login --profile <name>`
-4. Your browser opens to the AWS SSO login page
-5. After successful authentication, the tunnel starts automatically
-
-**Benefits**:
-- No need to manually run `aws sso login` before using the tool
-- Works with multiple AWS accounts and SSO configurations
-- Automatic re-authentication when tokens expire
-- Each tunnel can use a different SSO profile
-
-**Example with SSO**:
-
-```yaml
-aws:
-  profile: default  # Global profile (optional)
-
-tunnels:
-  # Production account with SSO
-  - name: prod-db
-    local_port: 3306
-    rds_endpoint: prod-db.cluster-xxxxx.us-east-1.rds.amazonaws.com
-    rds_port: 3306
-    instance_pattern: bastion-prod-*
-    aws_profile: production-sso    # SSO profile
-    description: "Production DB"
-
-  # Customer account with different SSO
-  - name: customer-db
-    local_port: 3307
-    rds_endpoint: customer-db.cluster-xxxxx.eu-west-1.rds.amazonaws.com
-    rds_port: 3306
-    instance_pattern: bastion-*
-    aws_profile: customer-sso      # Different SSO profile
-    aws_region: eu-west-1
-    description: "Customer DB"
-```
-
-**What you'll see**:
 ```
 [SSO] Profile 'production-sso' requires authentication. Opening SSO login page...
-[SSO] Running: aws sso login --profile production-sso
 [SSO] Profile 'production-sso' successfully authenticated
 [Production DB] Discovering instance matching pattern: bastion-prod-*
 [Production DB] Discovered instance: i-0123456789abcdef0
 [Production DB] Starting SSM tunnel on port 13306...
 ```
 
-### Configuration Validation
-
-The application validates configuration on startup and will report errors for:
-- Missing required fields
-- Invalid port numbers
-- Duplicate local ports
-- Invalid AWS instance IDs
-- Invalid log levels
-- Missing instance_id or instance_pattern (must have one)
-- Both instance_id and instance_pattern specified (mutually exclusive)
-
-## Usage
-
-### Basic Usage
-
-Start all configured tunnels:
-```bash
-./lazy-ssm
-```
-
-### Using a Custom Config File
-
-```bash
-./lazy-ssm --config /path/to/config.yaml
-```
-
-### Override AWS Profile
-
-```bash
-./lazy-ssm --profile production
-```
-
-### Override AWS Region
-
-```bash
-./lazy-ssm --region us-west-2
-```
-
-### Combined Options
-
-```bash
-./lazy-ssm --config prod-config.yaml --profile production --region us-west-2
-```
-
-### Help
-
-```bash
-./lazy-ssm --help
-```
-
 ## How It Works
-
-1. **Listening**: The tunnel manager listens on configured local ports
-2. **On-Demand**: When a connection is detected, an SSM tunnel is started automatically
-3. **Proxying**: Traffic is proxied between the client and RDS through the SSM tunnel
-4. **Idle Detection**: After the configured idle timeout, unused tunnels are closed
-5. **Reconnection**: Tunnels automatically restart when new connections arrive
-
-## Architecture
 
 ```
 Client → Local Port → Lazy SSM Manager → SSM Tunnel → EC2 Bastion → RDS Database
@@ -333,60 +223,54 @@ Client → Local Port → Lazy SSM Manager → SSM Tunnel → EC2 Bastion → RD
                      based on activity
 ```
 
-## Example: Connecting to MySQL
-
-Once the tunnel manager is running:
-
-```bash
-# Connect using standard MySQL client
-mysql -h localhost -P 3306 -u username -p
-
-# Or use any MySQL GUI tool pointing to localhost:3306
-```
+1. **Listening**: The tunnel manager listens on configured local ports
+2. **On-Demand**: When a connection is detected, an SSM tunnel is started automatically
+3. **Proxying**: Traffic is proxied between the client and RDS through the SSM tunnel
+4. **Idle Detection**: After the configured idle timeout, unused tunnels are closed
+5. **Reconnection**: Tunnels automatically restart when new connections arrive
 
 ## Project Structure
 
 ```
 lazy-ssm/
-├── main.go                          # Application entry point
+├── main.go                    # Entry point
 ├── cmd/
-│   ├── root.go                      # Root command, CLI flags, and tunnel manager startup
-│   ├── start.go                     # Start command with daemon/foreground modes
-│   ├── stop.go                      # Graceful daemon shutdown
-│   ├── restart.go                   # Daemon restart (stop + start)
-│   ├── reload.go                    # Hot configuration reload
-│   ├── status.go                    # Daemon and tunnel status reporting
-│   └── version.go                   # Version command (set via ldflags at build time)
+│   ├── root.go                # Root command and tunnel manager startup
+│   ├── status.go              # Service status via brew services
+│   ├── tail.go                # Log tail command
+│   └── version.go             # Version command
 ├── config/
-│   ├── config.go                    # Configuration loading with Viper
-│   └── validation.go               # Configuration validation rules
+│   ├── config.go              # Configuration loading with Viper
+│   └── validation.go          # Configuration validation
 ├── tunnel/
-│   ├── tunnel.go                    # LazySSMTunnel implementation and connection proxying
-│   └── manager.go                   # TunnelManager coordination and lifecycle
-├── daemon/
-│   └── daemon.go                    # Daemon process management (PID file, Unix socket IPC)
+│   ├── tunnel.go              # Tunnel implementation and connection proxying
+│   └── manager.go             # Tunnel lifecycle coordination
 ├── ec2/
-│   └── discovery.go                 # EC2 instance discovery by Name tag pattern
+│   └── discovery.go           # EC2 instance discovery by Name tag pattern
 ├── sso/
-│   └── auth.go                      # AWS SSO authentication handling
-├── .github/
-│   └── workflows/
-│       └── release.yml              # CI/CD release workflow
-├── config.example.yaml              # Example configuration template
-├── go.mod                           # Go module definition
-├── ARCHITECTURE.md                  # System design documentation
-├── SERVICE.md                       # Daemon mode documentation
-└── README.md                        # This file
+│   └── auth.go                # AWS SSO authentication handling
+└── .github/
+    └── workflows/
+        ├── release.yml         # Release workflow
+        └── update-homebrew.yml # Homebrew formula update
 ```
 
 ## Security Considerations
 
-- **Configuration Files**: The `config.yaml` file is gitignored by default as it may contain sensitive resource IDs
+- **Configuration Files**: `~/.lazy-ssm/config.yaml` may contain sensitive resource IDs — keep it private
 - **AWS Credentials**: Never commit AWS credentials. Use AWS CLI profiles or IAM roles
-- **Network Exposure**: Tunnels listen on localhost by default to prevent external access
+- **Network Exposure**: Tunnels listen on `localhost` by default to prevent external access
 - **Port Permissions**: Use ports ≥1024 to avoid requiring root privileges
 
 ## Troubleshooting
+
+### Service won't start
+
+```bash
+brew services list              # check service state
+lazy-ssm tail                   # check recent logs
+lazy-ssm --config ~/.lazy-ssm/config.yaml  # run in foreground to see errors directly
+```
 
 ### Tunnel fails to start
 
@@ -402,49 +286,28 @@ lazy-ssm/
 2. Check that you have `ec2:DescribeInstances` IAM permission
 3. Ensure at least one matching instance is in **running** state
 4. Verify the instance has an IAM instance profile (required for SSM)
-5. Check the AWS profile and region are correct for the tunnel
-6. Use `--log-level debug` to see detailed discovery information
 
 ### SSO authentication issues
 
-1. Verify your AWS CLI is configured for SSO: `aws configure get sso_start_url --profile <name>`
-2. Check your SSO configuration in `~/.aws/config`
-3. Ensure you have network access to the SSO login page
-4. Try manual login first: `aws sso login --profile <name>`
-5. Verify SSO session hasn't been revoked in AWS IAM Identity Center
+1. Check your SSO configuration: `aws configure get sso_start_url --profile <name>`
+2. Try manual login first: `aws sso login --profile <name>`
+3. Verify SSO session hasn't been revoked in AWS IAM Identity Center
 
 ### Connection refused
 
-1. Verify the tunnel is configured correctly in `config.yaml`
-2. Check the logs for tunnel startup errors
-3. Ensure the RDS endpoint is correct
-4. Verify security groups allow traffic from the bastion instance
+1. Check `lazy-ssm tail` for tunnel startup errors
+2. Ensure the RDS endpoint is correct
+3. Verify security groups allow traffic from the bastion instance
 
 ### Permission denied on port
 
-Ports below 1024 require root privileges. Either:
-- Use ports ≥1024 in your configuration
-- Run with sudo (not recommended)
+Use ports ≥1024 in your configuration, or run with sudo (not recommended).
 
 ## Development
 
-### Building
-
 ```bash
-go build -o lazy-ssm
-```
-
-### Running Tests
-
-```bash
-go test ./...
-```
-
-### Adding Dependencies
-
-```bash
-go get github.com/example/package
-go mod tidy
+go build -o lazy-ssm    # build
+go test ./...           # run tests
 ```
 
 ## License
