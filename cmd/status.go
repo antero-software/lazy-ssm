@@ -2,55 +2,34 @@ package cmd
 
 import (
 	"fmt"
+	"os/exec"
+	"strings"
 
-	"github.com/antero-software/lazy-ssm/daemon"
 	"github.com/spf13/cobra"
 )
 
 var statusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Show daemon status",
-	Long: `Show the current status of the daemon including:
-- Process ID (PID)
-- Number of configured tunnels
-- Status of each tunnel (ports, endpoints, active connections)`,
-	RunE: cmdStatus,
+	Short: "Show service status",
+	Long:  `Show the current status of the lazy-ssm brew service.`,
+	RunE:  cmdStatus,
 }
 
 func cmdStatus(_ *cobra.Command, _ []string) error {
-	d := daemon.New()
-
-	if !d.IsRunning() {
-		fmt.Println("Daemon is not running")
-		return nil
-	}
-
-	pid, _ := d.GetPID()
-	fmt.Printf("Daemon is running with PID %d\n", pid)
-
-	// Try to get detailed status
-	resp, err := daemon.SendCommand(daemon.CmdStatus)
+	out, err := exec.Command("brew", "services", "list").Output()
 	if err != nil {
-		fmt.Printf("Warning: could not get detailed status: %v\n", err)
+		fmt.Println("Could not run 'brew services list'. Is Homebrew installed?")
 		return nil
 	}
 
-	if resp.Success && resp.Data != nil {
-		if tunnelCount, ok := resp.Data["tunnel_count"].(float64); ok {
-			fmt.Printf("Tunnels: %d\n", int(tunnelCount))
-		}
-		if tunnels, ok := resp.Data["tunnels"].([]interface{}); ok {
-			fmt.Println("\nActive tunnels:")
-			for _, t := range tunnels {
-				if tunnelData, ok := t.(map[string]interface{}); ok {
-					fmt.Printf("  - %s (%s)\n", tunnelData["name"], tunnelData["description"])
-					fmt.Printf("    Local port: %v\n", tunnelData["local_port"])
-					fmt.Printf("    RDS endpoint: %v\n", tunnelData["rds_endpoint"])
-					fmt.Printf("    Active connections: %v\n", tunnelData["connections"])
-				}
-			}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, "lazy-ssm") {
+			fmt.Println(line)
+			return nil
 		}
 	}
 
+	fmt.Println("lazy-ssm is not registered as a brew service.")
+	fmt.Println("To install: brew services start lazy-ssm")
 	return nil
 }
