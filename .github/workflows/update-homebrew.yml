@@ -60,21 +60,9 @@ jobs:
         run: |
           cd homebrew-tap/Formula
           if ! grep -q "service do" lazy-ssm.rb; then
-            python3 - <<'EOF'
-content = open("lazy-ssm.rb").read().rstrip("\n")
-service = """
-  service do
-    run [opt_bin/"lazy-ssm"]
-    keep_alive true
-    log_path var/"log/lazy-ssm.log"
-    error_log_path var/"log/lazy-ssm.log"
-    working_dir var
-  end
-"""
-# Insert before the final closing 'end'
-idx = content.rfind("\nend")
-open("lazy-ssm.rb", "w").write(content[:idx] + service + "end\n")
-EOF
+            head -n -1 lazy-ssm.rb > lazy-ssm.tmp
+            printf '  service do\n    run [opt_bin/"lazy-ssm"]\n    keep_alive true\n    log_path var/"log/lazy-ssm.log"\n    error_log_path var/"log/lazy-ssm.log"\n    working_dir var\n  end\nend\n' >> lazy-ssm.tmp
+            mv lazy-ssm.tmp lazy-ssm.rb
           fi
 
       - name: Commit and push
