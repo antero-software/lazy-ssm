@@ -26,8 +26,8 @@ jobs:
         run: |
           SHA=${{ github.event.workflow_run.head_sha }}
           TAG_NAME=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.github.com/repos/${{ github.repository }}/releases | \
-            jq -r '.[] | select(.target_commitish=="'"$SHA"'") | .tag_name' | head -1)
+            "https://api.github.com/repos/${{ github.repository }}/tags?per_page=100" | \
+            jq -r '.[] | select(.commit.sha=="'"$SHA"'") | .name' | head -1)
 
           if [ -z "$TAG_NAME" ]; then
             echo "❌ Tag not found for SHA $SHA"
