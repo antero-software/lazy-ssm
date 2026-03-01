@@ -89,6 +89,7 @@ jobs:
               log_path var/"log/lazy-ssm.log"
               error_log_path var/"log/lazy-ssm.log"
               working_dir var
+              environment_variables PATH: std_service_path_env
             end
 
             test do
@@ -114,6 +115,11 @@ jobs:
           sed -i "/darwin-amd64.tar.gz/{n;s/sha256 \".*\"/sha256 \"$AMD_SHA\"/;}" lazy-ssm.rb
           sed -i "/linux-arm64.tar.gz/{n;s/sha256 \".*\"/sha256 \"$LINUX_ARM_SHA\"/;}" lazy-ssm.rb
           sed -i "/linux-amd64.tar.gz/{n;s/sha256 \".*\"/sha256 \"$LINUX_AMD_SHA\"/;}" lazy-ssm.rb
+
+          # Ensure service block has PATH so aws + session-manager-plugin are found
+          if ! grep -q "environment_variables" lazy-ssm.rb; then
+            sed -i "s/working_dir var/working_dir var\n              environment_variables PATH: std_service_path_env/" lazy-ssm.rb
+          fi
 
       - name: Commit and push
         run: |
