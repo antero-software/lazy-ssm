@@ -21,11 +21,21 @@ On-demand AWS Systems Manager tunnels to RDS databases through EC2 bastion insta
 
 ## Installation
 
-### Homebrew (recommended)
+### macOS
 
 ```bash
 brew install antero-software/lazy-ssm/lazy-ssm
 ```
+
+### Linux
+
+Install [Homebrew for Linux](https://brew.sh) if not already installed, then:
+
+```bash
+brew install antero-software/lazy-ssm/lazy-ssm
+```
+
+`brew services` on Linux uses systemd, so the same commands work on both platforms.
 
 ### From Source
 

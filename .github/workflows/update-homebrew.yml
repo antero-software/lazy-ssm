@@ -40,8 +40,63 @@ jobs:
         run: |
           curl -LO https://github.com/antero-software/lazy-ssm/releases/download/$VERSION/lazy-ssm-darwin-arm64.tar.gz
           curl -LO https://github.com/antero-software/lazy-ssm/releases/download/$VERSION/lazy-ssm-darwin-amd64.tar.gz
+          curl -LO https://github.com/antero-software/lazy-ssm/releases/download/$VERSION/lazy-ssm-linux-arm64.tar.gz
+          curl -LO https://github.com/antero-software/lazy-ssm/releases/download/$VERSION/lazy-ssm-linux-amd64.tar.gz
           echo "ARM_SHA=$(shasum -a 256 lazy-ssm-darwin-arm64.tar.gz | awk '{print $1}')" >> $GITHUB_ENV
           echo "AMD_SHA=$(shasum -a 256 lazy-ssm-darwin-amd64.tar.gz | awk '{print $1}')" >> $GITHUB_ENV
+          echo "LINUX_ARM_SHA=$(shasum -a 256 lazy-ssm-linux-arm64.tar.gz | awk '{print $1}')" >> $GITHUB_ENV
+          echo "LINUX_AMD_SHA=$(shasum -a 256 lazy-ssm-linux-amd64.tar.gz | awk '{print $1}')" >> $GITHUB_ENV
+
+      - name: Bootstrap formula if absent
+        run: |
+          cd homebrew-tap/Formula
+          if [ ! -f lazy-ssm.rb ]; then
+            cat > lazy-ssm.rb << 'FORMULA'
+          class LazySsm < Formula
+            desc "On-demand AWS SSM tunnels to RDS databases through EC2 bastion instances"
+            homepage "https://github.com/antero-software/lazy-ssm"
+            version "PLACEHOLDER_VERSION"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/antero-software/lazy-ssm/releases/download/PLACEHOLDER_VERSION/lazy-ssm-darwin-arm64.tar.gz"
+                sha256 "PLACEHOLDER"
+              end
+              on_intel do
+                url "https://github.com/antero-software/lazy-ssm/releases/download/PLACEHOLDER_VERSION/lazy-ssm-darwin-amd64.tar.gz"
+                sha256 "PLACEHOLDER"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "https://github.com/antero-software/lazy-ssm/releases/download/PLACEHOLDER_VERSION/lazy-ssm-linux-arm64.tar.gz"
+                sha256 "PLACEHOLDER"
+              end
+              on_intel do
+                url "https://github.com/antero-software/lazy-ssm/releases/download/PLACEHOLDER_VERSION/lazy-ssm-linux-amd64.tar.gz"
+                sha256 "PLACEHOLDER"
+              end
+            end
+
+            def install
+              bin.install "lazy-ssm"
+            end
+
+            service do
+              run [opt_bin/"lazy-ssm"]
+              keep_alive true
+              log_path var/"log/lazy-ssm.log"
+              error_log_path var/"log/lazy-ssm.log"
+              working_dir var
+            end
+
+            test do
+              system "#{bin}/lazy-ssm", "version"
+            end
+          end
+          FORMULA
+          fi
 
       - name: Update Formula file
         run: |
@@ -51,19 +106,14 @@ jobs:
           sed -i "s/version \".*\"/version \"$VERSION\"/" lazy-ssm.rb
           sed -i "s|download/.*/lazy-ssm-darwin-arm64.tar.gz|download/$VERSION/lazy-ssm-darwin-arm64.tar.gz|" lazy-ssm.rb
           sed -i "s|download/.*/lazy-ssm-darwin-amd64.tar.gz|download/$VERSION/lazy-ssm-darwin-amd64.tar.gz|" lazy-ssm.rb
+          sed -i "s|download/.*/lazy-ssm-linux-arm64.tar.gz|download/$VERSION/lazy-ssm-linux-arm64.tar.gz|" lazy-ssm.rb
+          sed -i "s|download/.*/lazy-ssm-linux-amd64.tar.gz|download/$VERSION/lazy-ssm-linux-amd64.tar.gz|" lazy-ssm.rb
 
           # Update sha256 for each arch individually
           sed -i "/darwin-arm64.tar.gz/{n;s/sha256 \".*\"/sha256 \"$ARM_SHA\"/;}" lazy-ssm.rb
           sed -i "/darwin-amd64.tar.gz/{n;s/sha256 \".*\"/sha256 \"$AMD_SHA\"/;}" lazy-ssm.rb
-
-      - name: Ensure service block is present
-        run: |
-          cd homebrew-tap/Formula
-          if ! grep -q "service do" lazy-ssm.rb; then
-            head -n -1 lazy-ssm.rb > lazy-ssm.tmp
-            printf '  service do\n    run [opt_bin/"lazy-ssm"]\n    keep_alive true\n    log_path var/"log/lazy-ssm.log"\n    error_log_path var/"log/lazy-ssm.log"\n    working_dir var\n  end\nend\n' >> lazy-ssm.tmp
-            mv lazy-ssm.tmp lazy-ssm.rb
-          fi
+          sed -i "/linux-arm64.tar.gz/{n;s/sha256 \".*\"/sha256 \"$LINUX_ARM_SHA\"/;}" lazy-ssm.rb
+          sed -i "/linux-amd64.tar.gz/{n;s/sha256 \".*\"/sha256 \"$LINUX_AMD_SHA\"/;}" lazy-ssm.rb
 
       - name: Commit and push
         run: |
