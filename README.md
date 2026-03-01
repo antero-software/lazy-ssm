@@ -42,12 +42,13 @@ go build
 ```yaml
 tunnels:
   - name: my-database
-    local_port: 3306
+    local_port: 23306
     rds_endpoint: my-db.cluster-xxxxx.us-east-1.rds.amazonaws.com
-    rds_port: 3306
+    rds_port: 3306ß
     instance_id: i-xxxxx
     description: "My Database"
 ```
+Note: For local port numbers, use ports ≥1024 to avoid requiring root privileges. Random ports are recommended to prevent conflicts with existing services. The tunnel manager will automatically start tunnels on demand when connections are detected on these ports.
 
 2. Start the service:
 
@@ -58,7 +59,7 @@ brew services start lazy-ssm
 3. Connect to your database as normal — the tunnel starts automatically on first connection:
 
 ```bash
-mysql -h localhost -P 3306 -u username -p
+mysql -h localhost -P 23306 -u username -p
 ```
 
 ## Running as a Service
