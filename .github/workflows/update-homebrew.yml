@@ -89,7 +89,7 @@ jobs:
               log_path var/"log/lazy-ssm.log"
               error_log_path var/"log/lazy-ssm.log"
               working_dir var
-              environment_variables PATH: std_service_path_env
+              environment_variables PATH: "/usr/local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
             end
 
             test do
@@ -118,7 +118,7 @@ jobs:
 
           # Ensure service block has PATH so aws + session-manager-plugin are found
           if ! grep -q "environment_variables" lazy-ssm.rb; then
-            sed -i "s/working_dir var/working_dir var\n              environment_variables PATH: std_service_path_env/" lazy-ssm.rb
+            sed -i "s/working_dir var/working_dir var\n              environment_variables PATH: "/usr/local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin"/" lazy-ssm.rb
           fi
 
       - name: Commit and push
