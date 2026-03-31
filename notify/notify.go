@@ -14,6 +14,7 @@ type Notifier struct {
 	mu       sync.Mutex
 	lastSent map[string]time.Time
 	cooldown time.Duration
+	now      func() time.Time
 	dispatch func(title, body, ssoURL string)
 }
 
@@ -23,6 +24,7 @@ func New(cooldown time.Duration) *Notifier {
 	n := &Notifier{
 		lastSent: make(map[string]time.Time),
 		cooldown: cooldown,
+		now:      time.Now,
 	}
 	n.dispatch = platformSend
 	return n
@@ -52,15 +54,18 @@ func (n *Notifier) SSO(profile, ssoURL string) {
 }
 
 // send deduplicates by title+body and dispatches if outside the cooldown window.
+// Note: two concurrent callers with the same key can both pass the cooldown check
+// before either records a timestamp. This may cause a duplicate notification in that
+// narrow window, which is acceptable for desktop notifications.
 func (n *Notifier) send(title, body, ssoURL string) {
 	key := title + "\x00" + body
 
 	n.mu.Lock()
-	if time.Since(n.lastSent[key]) < n.cooldown {
+	if n.now().Sub(n.lastSent[key]) < n.cooldown {
 		n.mu.Unlock()
 		return
 	}
-	n.lastSent[key] = time.Now()
+	n.lastSent[key] = n.now()
 	n.mu.Unlock()
 
 	n.dispatch(title, body, ssoURL)
