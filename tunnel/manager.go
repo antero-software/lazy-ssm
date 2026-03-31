@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/antero-software/lazy-ssm/config"
+	"github.com/antero-software/lazy-ssm/notify"
 )
 
 // TunnelManager manages multiple tunnels
@@ -46,6 +47,7 @@ func (tm *TunnelManager) Start(ctx context.Context) error {
 			defer tm.wg.Done()
 			if err := t.Start(tm.ctx); err != nil && err != context.Canceled {
 				log.Printf("Tunnel error: %v", err)
+				notify.Error("lazy-ssm error", err.Error())
 			}
 		}(tunnel)
 	}
@@ -94,6 +96,7 @@ func (tm *TunnelManager) Reload(configPath, profile, region string) error {
 			defer tm.wg.Done()
 			if err := t.Start(tm.ctx); err != nil && err != context.Canceled {
 				log.Printf("Tunnel error: %v", err)
+				notify.Error("lazy-ssm error", err.Error())
 			}
 		}(tunnel)
 	}
