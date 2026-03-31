@@ -16,6 +16,7 @@ import (
 
 	"github.com/antero-software/lazy-ssm/config"
 	"github.com/antero-software/lazy-ssm/ec2"
+	"github.com/antero-software/lazy-ssm/notify"
 	"github.com/antero-software/lazy-ssm/sso"
 )
 
@@ -209,6 +210,10 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 
 		if waitErr != nil {
 			log.Printf("[%s] ERROR: SSM tunnel process exited: %v", t.config.Description, waitErr)
+			notify.Error(
+				fmt.Sprintf("Tunnel error: %s", t.config.Description),
+				fmt.Sprintf("SSM tunnel process exited: %v", waitErr),
+			)
 		} else {
 			log.Printf("[%s] SSM tunnel process exited", t.config.Description)
 		}
@@ -270,6 +275,10 @@ func (t *LazySSMTunnel) scanTunnelOutput(r io.Reader) {
 		if strings.Contains(lower, "error") || strings.Contains(lower, "failed") ||
 			strings.Contains(lower, "unable") || strings.Contains(lower, "cannot") {
 			log.Printf("[%s] SSM ERROR: %s", t.config.Description, line)
+			notify.Error(
+				fmt.Sprintf("Tunnel error: %s", t.config.Description),
+				line,
+			)
 		} else {
 			log.Printf("[%s] SSM: %s", t.config.Description, line)
 		}
@@ -289,6 +298,10 @@ func (t *LazySSMTunnel) handleConnection(clientConn net.Conn) {
 	// Ensure tunnel is running
 	if err := t.ensureTunnel(); err != nil {
 		log.Printf("[%s] Failed to ensure tunnel: %v", t.config.Description, err)
+		notify.Error(
+			fmt.Sprintf("Tunnel failed: %s", t.config.Description),
+			err.Error(),
+		)
 		return
 	}
 
