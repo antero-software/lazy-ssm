@@ -2,6 +2,7 @@ package notify
 
 import (
 	"fmt"
+	"log"
 	"os/exec"
 	"runtime"
 	"sync"
@@ -87,12 +88,16 @@ func sendDarwin(title, body, ssoURL string) {
 		if ssoURL != "" {
 			args = append(args, "-open", ssoURL)
 		}
-		if exec.Command(notifierPath, args...).Run() == nil {
+		if err := exec.Command(notifierPath, args...).Run(); err == nil {
 			return
+		} else {
+			log.Printf("[notify] terminal-notifier failed: %v", err)
 		}
 	}
 	script := fmt.Sprintf(`display notification %q with title %q sound name "default"`, body, title)
-	exec.Command("osascript", "-e", script).Run() //nolint:errcheck
+	if err := exec.Command("osascript", "-e", script).Run(); err != nil {
+		log.Printf("[notify] osascript notification failed: %v", err)
+	}
 }
 
 func sendLinux(title, body, ssoURL string) {

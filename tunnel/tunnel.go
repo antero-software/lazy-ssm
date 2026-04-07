@@ -212,7 +212,8 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 			log.Printf("[%s] ERROR: SSM tunnel process exited: %v", t.config.Description, waitErr)
 			notify.Error(
 				fmt.Sprintf("Tunnel error: %s", t.config.Description),
-				fmt.Sprintf("SSM tunnel process exited: %v", waitErr),
+				fmt.Sprintf("SSM tunnel process exited: %v — verify instance matching '%s' can reach %s:%d",
+					waitErr, t.config.InstancePattern, t.config.RDSEndpoint, t.config.RDSPort),
 			)
 		} else {
 			log.Printf("[%s] SSM tunnel process exited", t.config.Description)

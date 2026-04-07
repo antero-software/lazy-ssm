@@ -1,12 +1,17 @@
 package sso
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/antero-software/lazy-ssm/notify"
 )
 
 // AuthChecker handles AWS SSO authentication checks
@@ -35,7 +40,7 @@ func (a *AuthChecker) CheckAndLogin(ctx context.Context, profile, region string)
 	}
 
 	// Check if this is an SSO profile
-	isSSO, err := a.isSSOProfile(ctx, profile)
+	isSSO, ssoURL, err := a.isSSOProfile(ctx, profile)
 	if err != nil {
 		return fmt.Errorf("failed to check if profile is SSO: %w", err)
 	}
@@ -46,6 +51,7 @@ func (a *AuthChecker) CheckAndLogin(ctx context.Context, profile, region string)
 
 	// Initiate SSO login
 	log.Printf("[SSO] Profile '%s' requires authentication. Opening SSO login page...", profile)
+	notify.SSO(profile, ssoURL)
 	if err := a.initiateLogin(ctx, profile); err != nil {
 		return fmt.Errorf("SSO login failed: %w", err)
 	}
@@ -106,28 +112,70 @@ func (a *AuthChecker) needsAuthentication(ctx context.Context, profile, region s
 	return false, nil
 }
 
-// isSSOProfile checks if a profile is configured for SSO
-func (a *AuthChecker) isSSOProfile(ctx context.Context, profile string) (bool, error) {
-	args := []string{"configure", "get", "sso_start_url"}
-
-	if profile != "" {
-		args = append(args, "--profile", profile)
-	}
-
+// isSSOProfile checks if a profile is configured for SSO and returns the start URL.
+// Supports both legacy profiles (sso_start_url directly in profile) and
+// modern profiles (sso_session reference pointing to a [sso-session] block).
+func (a *AuthChecker) isSSOProfile(ctx context.Context, profile string) (bool, string, error) {
 	cmdCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(cmdCtx, a.cliPath, args...)
-	output, err := cmd.CombinedOutput()
-
-	if err != nil {
-		// If we can't get sso_start_url, it's not an SSO profile
-		return false, nil
+	// Old-style: sso_start_url directly in the profile section.
+	args := []string{"configure", "get", "sso_start_url"}
+	if profile != "" {
+		args = append(args, "--profile", profile)
+	}
+	if output, err := exec.CommandContext(cmdCtx, a.cliPath, args...).CombinedOutput(); err == nil {
+		if url := strings.TrimSpace(string(output)); url != "" {
+			return true, url, nil
+		}
 	}
 
-	// If we got a URL, it's an SSO profile
-	url := strings.TrimSpace(string(output))
-	return url != "", nil
+	// New-style: profile references an [sso-session] block via sso_session key.
+	args = []string{"configure", "get", "sso_session"}
+	if profile != "" {
+		args = append(args, "--profile", profile)
+	}
+	output, err := exec.CommandContext(cmdCtx, a.cliPath, args...).CombinedOutput()
+	if err != nil {
+		return false, "", nil
+	}
+	sessionName := strings.TrimSpace(string(output))
+	if sessionName == "" {
+		return false, "", nil
+	}
+
+	url := ssoSessionURL(sessionName)
+	return true, url, nil
+}
+
+// ssoSessionURL reads sso_start_url from the [sso-session <name>] block in ~/.aws/config.
+func ssoSessionURL(sessionName string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	f, err := os.Open(filepath.Join(home, ".aws", "config"))
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	target := "[sso-session " + sessionName + "]"
+	inSection := false
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "[") {
+			inSection = line == target
+			continue
+		}
+		if inSection {
+			if k, v, ok := strings.Cut(line, "="); ok && strings.TrimSpace(k) == "sso_start_url" {
+				return strings.TrimSpace(v)
+			}
+		}
+	}
+	return ""
 }
 
 // initiateLogin starts the AWS SSO login process

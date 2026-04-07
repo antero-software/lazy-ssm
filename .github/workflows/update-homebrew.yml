@@ -89,6 +89,7 @@ jobs:
               log_path var/"log/lazy-ssm.log"
               error_log_path var/"log/lazy-ssm.log"
               working_dir var
+              process_type :interactive
               environment_variables PATH: "/usr/local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
             end
 
