@@ -158,11 +158,14 @@ tunnels:
     description: "Production DB"     # Human-readable description
     aws_profile: production          # Optional: override AWS profile for this tunnel
     aws_region: us-east-1            # Optional: override AWS region for this tunnel
+    keepalive: 600                   # Optional: keep session alive >= 600s from first connection
 ```
 
 Each tunnel requires a unique `local_port`. Ports below 1024 require root privileges.
 
 Use either `instance_id` (explicit) or `instance_pattern` (wildcard auto-discovery) — not both.
+
+The optional per-tunnel `keepalive` (seconds) holds the SSM session open for at least that long, measured from the first connection that started it, and suppresses the global `idle_timeout` during that window. This is useful when you run frequent short-lived commands (e.g. one-shot `redli`/`psql` calls) and want to avoid tearing down and re-establishing — and re-logging into — the SSM session between them. Omit it or set `0` for the default idle-only behaviour.
 
 ### Instance Auto-Discovery
 

@@ -51,11 +51,12 @@ type TunnelConfig struct {
 	LocalPort       int    `mapstructure:"local_port"`
 	RDSEndpoint     string `mapstructure:"rds_endpoint"`
 	RDSPort         int    `mapstructure:"rds_port"`
-	InstanceID      string `mapstructure:"instance_id"`       // Explicit instance ID (e.g., i-xxxxx)
-	InstancePattern string `mapstructure:"instance_pattern"`  // Wildcard pattern (e.g., app-server-*)
+	InstanceID      string `mapstructure:"instance_id"`      // Explicit instance ID (e.g., i-xxxxx)
+	InstancePattern string `mapstructure:"instance_pattern"` // Wildcard pattern (e.g., app-server-*)
 	Description     string `mapstructure:"description"`
-	AWSProfile      string `mapstructure:"aws_profile"`       // Optional: per-tunnel AWS profile
-	AWSRegion       string `mapstructure:"aws_region"`        // Optional: per-tunnel AWS region
+	AWSProfile      string `mapstructure:"aws_profile"` // Optional: per-tunnel AWS profile
+	AWSRegion       string `mapstructure:"aws_region"`  // Optional: per-tunnel AWS region
+	Keepalive       int    `mapstructure:"keepalive"`   // Optional: keep tunnel alive >= N seconds from first connection (0 = disabled)
 }
 
 // Load loads configuration from file and environment variables

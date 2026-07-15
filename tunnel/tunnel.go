@@ -7,11 +7,11 @@ import (
 	"io"
 	"log"
 	"net"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/antero-software/lazy-ssm/config"
@@ -26,14 +26,15 @@ const (
 
 // LazySSMTunnel manages an on-demand SSM tunnel
 type LazySSMTunnel struct {
-	config         config.TunnelConfig
-	appConfig      *config.Config
-	tunnelPort     int
-	tunnelCmd      *exec.Cmd
-	mu             sync.Mutex
-	lastActivity   atomic.Int64
-	connections    atomic.Int32
-	resolvedInstID string // Cached resolved instance ID from pattern
+	config          config.TunnelConfig
+	appConfig       *config.Config
+	tunnelPort      int
+	tunnelCmd       *exec.Cmd
+	mu              sync.Mutex
+	lastActivity    atomic.Int64
+	connections     atomic.Int32
+	tunnelStartedAt atomic.Int64 // Unix seconds when the current SSM process started (0 if not running)
+	resolvedInstID  string       // Cached resolved instance ID from pattern
 }
 
 // findFreePort attempts to find a free port starting from the specified port
@@ -112,8 +113,9 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 
 	// Check if tunnel is already running
 	if t.tunnelCmd != nil && t.tunnelCmd.Process != nil {
-		// Check if process is still alive
-		if err := t.tunnelCmd.Process.Signal(os.Signal(nil)); err == nil {
+		// Check if process is still alive. Signal 0 performs an existence
+		// check without actually sending a signal: nil error means alive.
+		if err := t.tunnelCmd.Process.Signal(syscall.Signal(0)); err == nil {
 			return nil // Tunnel is still running
 		}
 	}
@@ -187,6 +189,10 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 		return fmt.Errorf("failed to start SSM tunnel: %w", err)
 	}
 
+	// Record when this SSM process started; the keepalive window is measured
+	// from here (i.e. from the first connection that started the session).
+	t.tunnelStartedAt.Store(time.Now().Unix())
+
 	// Capture the command reference before launching goroutines
 	cmd := t.tunnelCmd
 
@@ -204,6 +210,7 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 		t.mu.Lock()
 		if t.tunnelCmd == cmd {
 			t.tunnelCmd = nil
+			t.tunnelStartedAt.Store(0)
 			t.resolvedInstID = "" // Re-discover instance on next attempt
 		}
 		t.mu.Unlock()
@@ -234,6 +241,7 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 		select {
 		case <-exitCh:
 			t.tunnelCmd = nil
+			t.tunnelStartedAt.Store(0)
 			return fmt.Errorf("SSM tunnel process exited during startup - check that instance matching '%s' exists and can reach %s:%d",
 				t.config.InstancePattern, t.config.RDSEndpoint, t.config.RDSPort)
 		default:
@@ -258,6 +266,7 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 	// Timeout - kill the hung process; the exit goroutine will log and clean up
 	cmd.Process.Kill()
 	t.tunnelCmd = nil
+	t.tunnelStartedAt.Store(0)
 
 	return fmt.Errorf("tunnel failed to become ready after %v - verify instance matching '%s' can reach %s:%d",
 		readyTimeout, t.config.InstancePattern, t.config.RDSEndpoint, t.config.RDSPort)
@@ -379,12 +388,33 @@ func (t *LazySSMTunnel) Start(ctx context.Context) error {
 	}
 }
 
+// shouldCloseIdle reports whether an idle tunnel should be reaped now.
+//
+// A tunnel is reaped only when it has no open connections and has been idle
+// longer than idleTimeout. When keepalive > 0, the tunnel is held open for at
+// least keepalive seconds from startedAt (the SSM process start time), so the
+// idle timeout is suppressed while inside that window. keepalive or startedAt
+// of 0 disables the minimum-lifetime hold, preserving the original behaviour.
+func shouldCloseIdle(now, lastActivity int64, connections int32, idleTimeout, keepalive, startedAt int64) bool {
+	if connections != 0 || lastActivity == 0 {
+		return false
+	}
+	if now-lastActivity <= idleTimeout {
+		return false
+	}
+	if keepalive > 0 && startedAt > 0 && now-startedAt < keepalive {
+		return false // still inside keepalive window
+	}
+	return true
+}
+
 // monitorIdle closes the tunnel after inactivity
 func (t *LazySSMTunnel) monitorIdle(ctx context.Context) {
 	ticker := time.NewTicker(t.appConfig.Timeouts.IdleCheck)
 	defer ticker.Stop()
 
 	idleTimeout := int64(t.appConfig.Timeouts.IdleTimeout.Seconds())
+	keepalive := int64(t.config.Keepalive)
 
 	for {
 		select {
@@ -392,16 +422,11 @@ func (t *LazySSMTunnel) monitorIdle(ctx context.Context) {
 			t.shutdown()
 			return
 		case <-ticker.C:
-			lastActivity := t.lastActivity.Load()
-			connections := t.connections.Load()
-
-			if connections == 0 && lastActivity > 0 {
-				idleTime := time.Now().Unix() - lastActivity
-				if idleTime > idleTimeout {
-					log.Printf("[%s] Idle timeout reached, closing tunnel", t.config.Description)
-					t.closeTunnel()
-					t.lastActivity.Store(0)
-				}
+			if shouldCloseIdle(time.Now().Unix(), t.lastActivity.Load(), t.connections.Load(),
+				idleTimeout, keepalive, t.tunnelStartedAt.Load()) {
+				log.Printf("[%s] Idle timeout reached, closing tunnel", t.config.Description)
+				t.closeTunnel()
+				t.lastActivity.Store(0)
 			}
 		}
 	}
@@ -417,6 +442,7 @@ func (t *LazySSMTunnel) closeTunnel() {
 		t.tunnelCmd.Process.Kill()
 		t.tunnelCmd.Wait()
 		t.tunnelCmd = nil
+		t.tunnelStartedAt.Store(0)
 	}
 }
 
