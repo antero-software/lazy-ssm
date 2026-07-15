@@ -128,6 +128,10 @@ func validateTunnel(tunnel *TunnelConfig) error {
 		return fmt.Errorf("description is required")
 	}
 
+	if tunnel.Keepalive < 0 {
+		return fmt.Errorf("keepalive must be >= 0 (seconds)")
+	}
+
 	return nil
 }
 

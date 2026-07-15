@@ -42,6 +42,10 @@ tunnels:
     instance_pattern: bastion-staging-*  # Auto-discover instance by name pattern
     description: "Staging DB"
     aws_profile: staging
+    keepalive: 600                  # Optional: keep the SSM session alive for at
+                                    # least 600s (10m) from the first connection,
+                                    # ignoring idle_timeout during that window.
+                                    # Omit or set 0 for default idle-only behaviour.
 
   # Example: PostgreSQL Database (using wildcard pattern for auto-scaling group)
   - name: postgres-db
@@ -60,5 +64,7 @@ tunnels:
 # - Local ports must be >= 1024 (unless running as root)
 # - Each tunnel must have a unique local_port
 # - Per-tunnel aws_profile and aws_region override global AWS settings
+# - Optional per-tunnel keepalive (seconds) holds the SSM session open for at
+#   least that long from the first connection, on top of the global idle_timeout
 # - Use either instance_id (explicit) or instance_pattern (auto-discovery), not both
 # - Instance patterns use EC2 instance Name tag for matching (supports wildcards)
