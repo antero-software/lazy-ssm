@@ -2,11 +2,11 @@ package tunnel
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
 
 	"github.com/antero-software/lazy-ssm/config"
-	"github.com/antero-software/lazy-ssm/notify"
 )
 
 // TunnelManager manages multiple tunnels
@@ -47,13 +47,19 @@ func (tm *TunnelManager) Start(ctx context.Context) error {
 			defer tm.wg.Done()
 			if err := t.Start(tm.ctx); err != nil && err != context.Canceled {
 				log.Printf("Tunnel error: %v", err)
-				notify.Error("lazy-ssm error", err.Error())
+				t.listenProblem(err)
 			}
 		}(tunnel)
 	}
 
 	tm.wg.Wait()
 	return nil
+}
+
+// listenProblem shows a pop-up when a tunnel cannot listen on its local port.
+func (t *LazySSMTunnel) listenProblem(err error) {
+	t.problem(t.config.Name, fmt.Sprintf("%s: cannot connect", t.displayName()),
+		fmt.Sprintf("lazy-ssm cannot listen on local port %d. Another program may be using it.\n\n%v", t.config.LocalPort, err))
 }
 
 // Reload reloads the configuration and restarts tunnels
@@ -96,7 +102,7 @@ func (tm *TunnelManager) Reload(configPath, profile, region string) error {
 			defer tm.wg.Done()
 			if err := t.Start(tm.ctx); err != nil && err != context.Canceled {
 				log.Printf("Tunnel error: %v", err)
-				notify.Error("lazy-ssm error", err.Error())
+				t.listenProblem(err)
 			}
 		}(tunnel)
 	}

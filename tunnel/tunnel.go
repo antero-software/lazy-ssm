@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/antero-software/lazy-ssm/config"
+	"github.com/antero-software/lazy-ssm/diagnose"
 	"github.com/antero-software/lazy-ssm/ec2"
 	"github.com/antero-software/lazy-ssm/notify"
 	"github.com/antero-software/lazy-ssm/sso"
@@ -41,6 +42,14 @@ type LazySSMTunnel struct {
 
 	// problem shows a pop-up the user must act on (notify.Problem in production).
 	problem func(tunnel, title, message string)
+
+	// runDiagnosis runs the AWS checks (defaultDiagnosis in production).
+	runDiagnosis  func(ctx context.Context) diagnose.Report
+	diagnosing    atomic.Bool
+	lastDiagnosis atomic.Int64 // Unix nanoseconds when the last diagnosis finished
+	diagWG        sync.WaitGroup
+	diagMu        sync.Mutex
+	strongCause   error // a clear failure seen while a quiet one was being checked (guarded by diagMu)
 }
 
 // processWaitDelay bounds how long Wait waits for output pipes after the SSM
@@ -67,12 +76,14 @@ func findFreePort(listenAddr string, startPort int) (int, error) {
 
 // NewLazySSMTunnel creates a new tunnel manager
 func NewLazySSMTunnel(tunnelConfig config.TunnelConfig, appConfig *config.Config) *LazySSMTunnel {
-	return &LazySSMTunnel{
+	t := &LazySSMTunnel{
 		config:     tunnelConfig,
 		appConfig:  appConfig,
 		problem:    notify.Problem,
 		tunnelPort: tunnelConfig.LocalPort + appConfig.Network.TunnelPortOffset,
 	}
+	t.runDiagnosis = t.defaultDiagnosis
+	return t
 }
 
 // resolveInstanceID resolves the instance ID from either explicit ID or pattern
@@ -311,6 +322,9 @@ func (t *LazySSMTunnel) scanTunnelOutput(r io.Reader) {
 		if strings.Contains(lower, "error") || strings.Contains(lower, "failed") ||
 			strings.Contains(lower, "unable") || strings.Contains(lower, "cannot") {
 			log.Printf("[%s] SSM ERROR: %s", t.config.Description, line)
+			if isDestinationFailure(line) {
+				t.reportFailure(errDestination, triggerPlugin)
+			}
 		} else {
 			log.Printf("[%s] SSM: %s", t.config.Description, line)
 		}
@@ -330,10 +344,7 @@ func (t *LazySSMTunnel) handleConnection(clientConn net.Conn) {
 	// Ensure tunnel is running
 	if err := t.ensureTunnel(); err != nil {
 		log.Printf("[%s] Failed to ensure tunnel: %v", t.config.Description, err)
-		notify.Error(
-			fmt.Sprintf("Tunnel failed: %s", t.config.Description),
-			err.Error(),
-		)
+		t.reportFailure(err, triggerStart)
 		return
 	}
 
@@ -351,10 +362,12 @@ func (t *LazySSMTunnel) handleConnection(clientConn net.Conn) {
 
 	// Create error channel for goroutines
 	errCh := make(chan error, 2)
+	started := time.Now()
+	var fromDB atomic.Int64
 
 	// Proxy data bidirectionally
-	go t.copyData(tunnelConn, clientConn, errCh, "client->RDS")
-	go t.copyData(clientConn, tunnelConn, errCh, "RDS->client")
+	go t.copyData(tunnelConn, clientConn, errCh, nil)
+	go t.copyData(clientConn, tunnelConn, errCh, &fromDB)
 
 	// Wait for either direction to close
 	err = <-errCh
@@ -363,11 +376,19 @@ func (t *LazySSMTunnel) handleConnection(clientConn net.Conn) {
 	}
 
 	log.Printf("[%s] Connection from %s closed", t.config.Description, clientAddr)
+	if noResponse(fromDB.Load(), time.Since(started)) {
+		t.reportFailure(errNoResponse, triggerHeuristic)
+	}
 }
 
-// copyData copies data between connections
-func (t *LazySSMTunnel) copyData(dst, src net.Conn, errCh chan<- error, direction string) {
-	_, err := io.Copy(dst, src)
+// copyData copies data between connections. When counter is set, it adds
+// the bytes read from src.
+func (t *LazySSMTunnel) copyData(dst, src net.Conn, errCh chan<- error, counter *atomic.Int64) {
+	var r io.Reader = src
+	if counter != nil {
+		r = countingReader{r: src, n: counter}
+	}
+	_, err := io.Copy(dst, r)
 	errCh <- err
 
 	// Update activity on each data transfer

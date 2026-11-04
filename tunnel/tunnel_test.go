@@ -1,6 +1,10 @@
 package tunnel
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
 	"os/exec"
 	"strings"
 	"sync"
@@ -8,6 +12,8 @@ import (
 	"time"
 
 	"github.com/antero-software/lazy-ssm/config"
+	"github.com/antero-software/lazy-ssm/diagnose"
+	"github.com/antero-software/lazy-ssm/sso"
 )
 
 func TestShouldCloseIdle(t *testing.T) {
@@ -191,5 +197,224 @@ func TestDisplayName(t *testing.T) {
 	noDesc := NewLazySSMTunnel(config.TunnelConfig{Name: "staging-db"}, &config.Config{})
 	if got := noDesc.displayName(); got != "staging-db" {
 		t.Errorf("displayName = %q, want staging-db", got)
+	}
+}
+
+// fakeDiagnosis returns report, optionally waiting for release first.
+type fakeDiagnosis struct {
+	mu      sync.Mutex
+	calls   int
+	report  diagnose.Report
+	release chan struct{}
+	started chan struct{}
+}
+
+func (f *fakeDiagnosis) run(context.Context) diagnose.Report {
+	f.mu.Lock()
+	f.calls++
+	f.mu.Unlock()
+	if f.started != nil {
+		f.started <- struct{}{}
+	}
+	if f.release != nil {
+		<-f.release
+	}
+	return f.report
+}
+
+func (f *fakeDiagnosis) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+func diagTunnel(rec *problemRecorder, diag *fakeDiagnosis) *LazySSMTunnel {
+	tun := testTunnel(rec)
+	tun.runDiagnosis = diag.run
+	return tun
+}
+
+func failReport(msg, fix string) diagnose.Report {
+	return diagnose.Report{Results: []diagnose.Result{{Check: "Same VPC", Status: diagnose.Fail, Message: msg, Fix: fix}}}
+}
+
+func TestReportFailure_ShowsHeadline(t *testing.T) {
+	rec := &problemRecorder{}
+	tun := diagTunnel(rec, &fakeDiagnosis{report: failReport("m", "f")})
+
+	tun.reportFailure(errors.New("boom"), triggerStart)
+	tun.diagWG.Wait()
+
+	if rec.count() != 1 || rec.calls[0] != [3]string{"staging-db", "Staging DB: cannot connect", "m\n\nf"} {
+		t.Errorf("problem calls = %q", rec.calls)
+	}
+}
+
+func TestReportFailure_NoFixHasNoBlankLines(t *testing.T) {
+	rec := &problemRecorder{}
+	tun := diagTunnel(rec, &fakeDiagnosis{report: failReport("m", "")})
+
+	tun.reportFailure(errors.New("boom"), triggerStart)
+	tun.diagWG.Wait()
+
+	if rec.count() != 1 || rec.calls[0][2] != "m" {
+		t.Errorf("problem calls = %q", rec.calls)
+	}
+}
+
+func TestReportFailure_LoginDeclinedOrPausedLogsOnly(t *testing.T) {
+	for _, cause := range []error{sso.ErrLoginDeclined, sso.ErrLoginPaused} {
+		rec := &problemRecorder{}
+		diag := &fakeDiagnosis{report: failReport("m", "f")}
+		tun := diagTunnel(rec, diag)
+
+		tun.reportFailure(fmt.Errorf("SSO authentication failed: SSO login failed: %w", cause), triggerStart)
+		tun.diagWG.Wait()
+
+		if diag.count() != 0 || rec.count() != 0 {
+			t.Errorf("%v: diagnoses = %d, problems = %d, want 0 and 0", cause, diag.count(), rec.count())
+		}
+	}
+}
+
+func TestReportFailure_OneDiagnosisAtATime(t *testing.T) {
+	rec := &problemRecorder{}
+	diag := &fakeDiagnosis{report: failReport("m", "f"), release: make(chan struct{}), started: make(chan struct{}, 2)}
+	tun := diagTunnel(rec, diag)
+
+	tun.reportFailure(errors.New("first"), triggerStart)
+	<-diag.started
+	tun.reportFailure(errors.New("second"), triggerPlugin)
+	close(diag.release)
+	tun.diagWG.Wait()
+
+	if diag.count() != 1 {
+		t.Errorf("diagnoses = %d, want 1", diag.count())
+	}
+	if rec.count() != 1 {
+		t.Errorf("problems = %d, want 1", rec.count())
+	}
+}
+
+func TestReportFailure_CooldownAfterDiagnosis(t *testing.T) {
+	rec := &problemRecorder{}
+	diag := &fakeDiagnosis{report: failReport("m", "f")}
+	tun := diagTunnel(rec, diag)
+
+	tun.reportFailure(errors.New("first"), triggerStart)
+	tun.diagWG.Wait()
+	tun.reportFailure(errors.New("again"), triggerStart)
+	tun.diagWG.Wait()
+
+	if diag.count() != 1 {
+		t.Errorf("diagnoses within the cooldown = %d, want 1", diag.count())
+	}
+}
+
+func TestReportFailure_HeuristicAllPassLogsOnly(t *testing.T) {
+	rec := &problemRecorder{}
+	tun := diagTunnel(rec, &fakeDiagnosis{})
+
+	tun.reportFailure(errNoResponse, triggerHeuristic)
+	tun.diagWG.Wait()
+
+	if rec.count() != 0 {
+		t.Errorf("problems = %q, want none", rec.calls)
+	}
+}
+
+func TestReportFailure_StrongTriggerDuringHeuristicRunShowsAllPassed(t *testing.T) {
+	rec := &problemRecorder{}
+	diag := &fakeDiagnosis{release: make(chan struct{}), started: make(chan struct{}, 1)}
+	tun := diagTunnel(rec, diag)
+
+	tun.reportFailure(errNoResponse, triggerHeuristic)
+	<-diag.started
+	tun.reportFailure(errDestination, triggerPlugin)
+	close(diag.release)
+	tun.diagWG.Wait()
+
+	if rec.count() != 1 || rec.calls[0][2] != diagnose.AllPassedMessage+"\n\n"+errDestination.Error() {
+		t.Errorf("problems = %q", rec.calls)
+	}
+}
+
+func TestReportFailure_StartAllPassShowsAllPassedAndCause(t *testing.T) {
+	rec := &problemRecorder{}
+	tun := diagTunnel(rec, &fakeDiagnosis{})
+	cause := errors.New("tunnel failed to become ready after 15s")
+
+	tun.reportFailure(cause, triggerStart)
+	tun.diagWG.Wait()
+
+	if rec.count() != 1 || rec.calls[0][2] != diagnose.AllPassedMessage+"\n\n"+cause.Error() {
+		t.Errorf("problems = %q", rec.calls)
+	}
+}
+
+func TestIsDestinationFailure(t *testing.T) {
+	tests := map[string]bool{
+		"Connection to destination port failed, check SSM Agent logs.": true,
+		"connection to destination port FAILED":                        true,
+		"Port 15432 opened for sessionId keith-0abc.":                  false,
+	}
+	for line, want := range tests {
+		if got := isDestinationFailure(line); got != want {
+			t.Errorf("isDestinationFailure(%q) = %v, want %v", line, got, want)
+		}
+	}
+}
+
+func TestScanTunnelOutput_DestinationLineTriggersDiagnosis(t *testing.T) {
+	rec := &problemRecorder{}
+	diag := &fakeDiagnosis{report: failReport("m", "f")}
+	tun := diagTunnel(rec, diag)
+
+	tun.scanTunnelOutput(strings.NewReader("Starting session with SessionId: x\nConnection to destination port failed, check SSM Agent logs.\n"))
+	tun.diagWG.Wait()
+
+	if diag.count() != 1 || rec.count() != 1 {
+		t.Errorf("diagnoses = %d, problems = %d, want 1 and 1", diag.count(), rec.count())
+	}
+}
+
+func TestNoResponse(t *testing.T) {
+	if !noResponse(0, time.Second) {
+		t.Error("zero bytes after 1s should count as no response")
+	}
+	if noResponse(0, 6*time.Second) {
+		t.Error("zero bytes after 6s should not count (a client that waited and quit)")
+	}
+	if noResponse(12, time.Second) {
+		t.Error("bytes from the database mean it answered")
+	}
+}
+
+func TestManagerStart_ListenErrorShowsProblem(t *testing.T) {
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+	port := busy.Addr().(*net.TCPAddr).Port
+
+	cfg := &config.Config{
+		Network: config.NetworkConfig{ListenAddress: "127.0.0.1", TunnelPortOffset: 10000},
+		Tunnels: []config.TunnelConfig{{Name: "staging-db", Description: "Staging DB", LocalPort: port}},
+	}
+	tm := NewTunnelManager(cfg)
+	rec := &problemRecorder{}
+	tm.tunnels[0].problem = rec.record
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	tm.Start(ctx)
+
+	if rec.count() != 1 {
+		t.Fatalf("problems = %q, want 1", rec.calls)
+	}
+	want := fmt.Sprintf("lazy-ssm cannot listen on local port %d. Another program may be using it.", port)
+	if rec.calls[0][1] != "Staging DB: cannot connect" || !strings.HasPrefix(rec.calls[0][2], want) {
+		t.Errorf("problem = %q", rec.calls[0])
 	}
 }
