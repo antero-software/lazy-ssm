@@ -208,3 +208,19 @@ func TestRun_OtherAWSErrorIsCouldNotCheck(t *testing.T) {
 		t.Errorf("Instance = %+v", inst)
 	}
 }
+
+func TestRun_MultipleEligibleSameVPCNoWarning(t *testing.T) {
+	aws := newFakeAWS().on("sts get-caller-identity", callerIdentity).on("ssm describe-instance-information", ssmOnline).
+		on("ec2 describe-instances", `[
+		  {"ID":"i-1","Name":"asg-node","VPC":"vpc-111","State":"running","SGs":[],"Profile":"p"},
+		  {"ID":"i-2","Name":"asg-node","VPC":"vpc-111","State":"running","SGs":[],"Profile":"p"},
+		  {"ID":"i-3","Name":"asg-node","VPC":"vpc-111","State":"running","SGs":[],"Profile":"p"}]`)
+
+	r := Run(context.Background(), stagingTunnel(), deps(aws))
+
+	for _, res := range r.Results {
+		if res.Check == "Instance" && res.Status == Warn {
+			t.Errorf("unexpected warning for an auto-scaling group in one VPC: %+v", res)
+		}
+	}
+}

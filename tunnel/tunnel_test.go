@@ -379,14 +379,22 @@ func TestScanTunnelOutput_DestinationLineTriggersDiagnosis(t *testing.T) {
 }
 
 func TestNoResponse(t *testing.T) {
-	if !noResponse(0, time.Second) {
-		t.Error("zero bytes after 1s should count as no response")
+	tests := []struct {
+		name               string
+		fromDB, fromClient int64
+		lasted             time.Duration
+		want               bool
+	}{
+		{"client sent, database silent, client gave up", 0, 5, 25 * time.Second, true},
+		{"server-first protocol never greeted", 0, 0, 25 * time.Second, true},
+		{"client sent, connection dropped at once", 0, 5, 100 * time.Millisecond, true},
+		{"instant port probe", 0, 0, 200 * time.Millisecond, false},
+		{"database answered", 12, 5, time.Second, false},
 	}
-	if noResponse(0, 6*time.Second) {
-		t.Error("zero bytes after 6s should not count (a client that waited and quit)")
-	}
-	if noResponse(12, time.Second) {
-		t.Error("bytes from the database mean it answered")
+	for _, tt := range tests {
+		if got := noResponse(tt.fromDB, tt.fromClient, tt.lasted); got != tt.want {
+			t.Errorf("%s: noResponse = %v, want %v", tt.name, got, tt.want)
+		}
 	}
 }
 

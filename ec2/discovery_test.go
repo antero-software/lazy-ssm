@@ -113,3 +113,21 @@ func TestFormatEligible(t *testing.T) {
 		t.Errorf("FormatEligible = %q, want %q", got, want)
 	}
 }
+
+func TestSpansVPCs(t *testing.T) {
+	sameVPC := []Instance{
+		{ID: "i-1", VPCID: "vpc-111", HasIAMProfile: true},
+		{ID: "i-2", VPCID: "vpc-111", HasIAMProfile: true},
+	}
+	if SpansVPCs(sameVPC) {
+		t.Error("SpansVPCs = true for matches in one VPC")
+	}
+	mixed := append(sameVPC, Instance{ID: "i-3", VPCID: "vpc-222", HasIAMProfile: true})
+	if !SpansVPCs(mixed) {
+		t.Error("SpansVPCs = false for matches in two VPCs")
+	}
+	noProfileElsewhere := append(sameVPC, Instance{ID: "i-4", VPCID: "vpc-222"})
+	if SpansVPCs(noProfileElsewhere) {
+		t.Error("SpansVPCs counted an instance SSM cannot use")
+	}
+}

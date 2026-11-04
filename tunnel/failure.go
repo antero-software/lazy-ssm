@@ -22,9 +22,9 @@ const (
 	// diagnosisCooldown stops a burst of failed connections (a SQL client
 	// retrying, or a connection pool) from re-running the AWS checks.
 	diagnosisCooldown = time.Minute
-	// noResponseWindow: a connection that closes this fast with no bytes
-	// from the database side probably never reached the database.
-	noResponseWindow = 5 * time.Second
+	// probeWindow: a connection shorter than this that sent nothing either
+	// way is a port check, not a failed connection.
+	probeWindow = time.Second
 )
 
 // failureTrigger says how a failure was noticed.
@@ -48,9 +48,13 @@ func isDestinationFailure(line string) bool {
 }
 
 // noResponse reports whether a finished connection looks like it never
-// reached the database.
-func noResponse(bytesFromDB int64, lasted time.Duration) bool {
-	return bytesFromDB == 0 && lasted < noResponseWindow
+// reached the database. A wrong VPC or a blocked port makes the instance's
+// connection hang, so the client gives up with nothing from the database
+// side, however long it waited. Every database protocol lazy-ssm carries
+// answers at once: server-first ones (MySQL) greet, client-first ones
+// (PostgreSQL, Redis) reply to the first bytes.
+func noResponse(bytesFromDB, bytesFromClient int64, lasted time.Duration) bool {
+	return bytesFromDB == 0 && (bytesFromClient > 0 || lasted >= probeWindow)
 }
 
 // defaultDiagnosis runs the real read-only AWS checks for this tunnel.

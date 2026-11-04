@@ -118,7 +118,7 @@ func instanceResults(ctx context.Context, tc config.TunnelConfig, disc *ec2.Inst
 	}
 
 	results := []Result{usingResult(chosen)}
-	if eligible > 1 {
+	if eligible > 1 && ec2.SpansVPCs(candidates) {
 		results = append(results, Result{
 			Check:  checkInstance,
 			Status: Warn,

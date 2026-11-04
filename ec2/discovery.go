@@ -105,6 +105,23 @@ func FormatEligible(candidates []Instance) string {
 	return strings.Join(parts, ", ")
 }
 
+// SpansVPCs reports whether the candidates SSM can use are in more than one
+// VPC. Several matches in one VPC (an auto-scaling group) are normal.
+func SpansVPCs(candidates []Instance) bool {
+	first := ""
+	for _, c := range candidates {
+		if !c.HasIAMProfile {
+			continue
+		}
+		if first == "" {
+			first = c.VPCID
+		} else if c.VPCID != first {
+			return true
+		}
+	}
+	return false
+}
+
 type rawInstance struct {
 	ID      string   `json:"ID"`
 	Name    string   `json:"Name"`

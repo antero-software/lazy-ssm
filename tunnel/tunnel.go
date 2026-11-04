@@ -117,8 +117,8 @@ func (t *LazySSMTunnel) resolveInstanceID(ctx context.Context) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("failed to discover instance: no running SSM-managed instance found matching pattern: %s", t.config.InstancePattern)
 	}
-	if eligible > 1 {
-		log.Printf("[%s] WARNING: %d instances match '%s': %s. Using %s (%s).",
+	if eligible > 1 && ec2.SpansVPCs(candidates) {
+		log.Printf("[%s] WARNING: %d instances in different VPCs match '%s': %s. Using %s (%s).",
 			t.config.Description, eligible, t.config.InstancePattern, ec2.FormatEligible(candidates), chosen.Name, chosen.ID)
 	}
 	instanceID := chosen.ID
@@ -363,10 +363,10 @@ func (t *LazySSMTunnel) handleConnection(clientConn net.Conn) {
 	// Create error channel for goroutines
 	errCh := make(chan error, 2)
 	started := time.Now()
-	var fromDB atomic.Int64
+	var fromDB, fromClient atomic.Int64
 
 	// Proxy data bidirectionally
-	go t.copyData(tunnelConn, clientConn, errCh, nil)
+	go t.copyData(tunnelConn, clientConn, errCh, &fromClient)
 	go t.copyData(clientConn, tunnelConn, errCh, &fromDB)
 
 	// Wait for either direction to close
@@ -376,7 +376,7 @@ func (t *LazySSMTunnel) handleConnection(clientConn net.Conn) {
 	}
 
 	log.Printf("[%s] Connection from %s closed", t.config.Description, clientAddr)
-	if noResponse(fromDB.Load(), time.Since(started)) {
+	if noResponse(fromDB.Load(), fromClient.Load(), time.Since(started)) {
 		t.reportFailure(errNoResponse, triggerHeuristic)
 	}
 }
