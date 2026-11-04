@@ -72,6 +72,9 @@ func (t *LazySSMTunnel) defaultDiagnosis(ctx context.Context) diagnose.Report {
 // none runs again within a minute of the last one.
 func (t *LazySSMTunnel) reportFailure(cause error, trigger failureTrigger) {
 	name := t.displayName()
+	if t.stopping.Load() {
+		return
+	}
 	if errors.Is(cause, sso.ErrLoginDeclined) || errors.Is(cause, sso.ErrLoginPaused) {
 		log.Printf("[%s] Not diagnosing: %v", name, cause)
 		return

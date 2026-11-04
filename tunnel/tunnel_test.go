@@ -505,3 +505,18 @@ func TestStart_CancelStopsSSMProcessBeforeReturning(t *testing.T) {
 		t.Fatal("SSM process still running after Start returned")
 	}
 }
+
+func TestReportFailure_SkippedDuringShutdown(t *testing.T) {
+	rec := &problemRecorder{}
+	diag := &fakeDiagnosis{report: failReport("m", "f")}
+	tun := diagTunnel(rec, diag)
+	tun.appConfig.Timeouts = config.TimeoutConfig{Shutdown: time.Second, ShutdownPoll: 10 * time.Millisecond}
+
+	tun.shutdown()
+	tun.reportFailure(errNoResponse, triggerHeuristic)
+	tun.diagWG.Wait()
+
+	if diag.count() != 0 || rec.count() != 0 {
+		t.Errorf("diagnoses = %d, problems = %d during shutdown, want 0 and 0", diag.count(), rec.count())
+	}
+}

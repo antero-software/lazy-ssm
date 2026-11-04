@@ -46,6 +46,7 @@ type LazySSMTunnel struct {
 	// runDiagnosis runs the AWS checks (defaultDiagnosis in production).
 	runDiagnosis  func(ctx context.Context) diagnose.Report
 	diagnosing    atomic.Bool
+	stopping      atomic.Bool  // set by shutdown: no new diagnoses
 	lastDiagnosis atomic.Int64 // Unix nanoseconds when the last diagnosis finished
 	diagWG        sync.WaitGroup
 	diagMu        sync.Mutex
@@ -515,6 +516,7 @@ func (t *LazySSMTunnel) closeTunnel() {
 // shutdown gracefully shuts down the tunnel
 func (t *LazySSMTunnel) shutdown() {
 	log.Printf("[%s] Shutting down", t.config.Description)
+	t.stopping.Store(true)
 
 	// Wait for active connections to finish (with timeout)
 	timeout := time.After(t.appConfig.Timeouts.Shutdown)
