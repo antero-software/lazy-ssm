@@ -47,24 +47,18 @@ func Run(ctx context.Context, tc config.TunnelConfig, d Deps) Report {
 	} else {
 		rep.Results = append(rep.Results, skipped(checkSSM)...)
 	}
-	rep.Results = append(rep.Results, networkResults(ctx, tc, d, inst, found)...)
-	pointMissingInstanceAtProfile(&rep)
+	network, rdsMissing := networkResults(ctx, tc, d, inst, found)
+	rep.Results = append(rep.Results, network...)
+	if rdsMissing {
+		pointMissingInstanceAtProfile(&rep)
+	}
 	return rep
 }
 
-// pointMissingInstanceAtProfile changes the fix for a missing instance when
-// the RDS database is missing too: then the profile or region is the likely
-// mistake, not the instance name.
+// pointMissingInstanceAtProfile changes the fix for a missing instance. It
+// is called when the RDS database is missing too: then the profile or region
+// is the likely mistake, not the instance name.
 func pointMissingInstanceAtProfile(rep *Report) {
-	dbMissing := false
-	for _, res := range rep.Results {
-		if res.Check == checkDatabase && res.Status == Warn && res.Fix == profileRegionFix {
-			dbMissing = true
-		}
-	}
-	if !dbMissing {
-		return
-	}
 	for i, res := range rep.Results {
 		if res.Check == checkInstance && res.Status == Fail && instanceMissing(res) {
 			rep.Results[i].Fix = profileRegionFix + " Neither the instance nor the database is in this account and region."

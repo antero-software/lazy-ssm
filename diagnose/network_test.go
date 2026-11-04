@@ -285,21 +285,36 @@ func TestRun_InstanceMissingStillChecksDatabase(t *testing.T) {
 	}
 }
 
-func TestRun_RDSAddressNotInAccount_WarnsProfileAndRegion(t *testing.T) {
-	aws := networkAWS(stgBastion, rulesAllowBastion)
+func TestRun_RDSAddressNotInAccount_IsCouldNotCheck(t *testing.T) {
 	tc := stagingTunnel()
 	tc.RDSEndpoint = "other.cluster-xyz.ap-southeast-2.rds.amazonaws.com"
-	d := deps(aws)
-	d.LookupHost = lookup()
+	d := deps(networkAWS(prodBastion, rulesAllowBastion))
+	d.LookupHost = lookup("10.9.0.5") // outside the instance VPC 10.0.0.0/16
 
 	r := Run(context.Background(), tc, d)
 
 	db, _ := resultFor(r, "Database")
-	if db.Status != Warn || db.Message != "other.cluster-xyz.ap-southeast-2.rds.amazonaws.com is an RDS address, but lazy-ssm cannot find it in this account and region." {
+	want := "other.cluster-xyz.ap-southeast-2.rds.amazonaws.com is an RDS address, but lazy-ssm cannot find it in this account and region, so it used the address check instead."
+	if db.Status != CouldNotCheck || db.Message != want || db.Fix != "" {
 		t.Errorf("Database = %+v", db)
 	}
-	if db.Fix != "Check aws_profile and aws_region in config.yaml." {
-		t.Errorf("fix = %q", db.Fix)
+	if head, ok := r.Headline(); !ok || head.Check != "Address in instance VPC" {
+		t.Errorf("Headline = (%+v, %v), want the address finding", head, ok)
+	}
+}
+
+func TestRun_RDSProxyEndpointIsNotTreatedAsMissing(t *testing.T) {
+	tc := stagingTunnel()
+	tc.RDSEndpoint = "stg.proxy-abc.ap-southeast-2.rds.amazonaws.com"
+
+	r := Run(context.Background(), tc, deps(networkAWS(`[]`, rulesAllowBastion)))
+
+	db, _ := resultFor(r, "Database")
+	if db.Message != "stg.proxy-abc.ap-southeast-2.rds.amazonaws.com is not an RDS database in this account and region, so lazy-ssm used the address check instead." {
+		t.Errorf("Database = %+v", db)
+	}
+	if inst, _ := resultFor(r, "Instance"); inst.Fix != "Check instance_pattern in config.yaml." {
+		t.Errorf("Instance fix = %q, want the instance_pattern fix", inst.Fix)
 	}
 }
 

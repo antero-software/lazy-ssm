@@ -193,9 +193,11 @@ func (p rawPermission) rule() sgRule {
 
 const profileRegionFix = "Check aws_profile and aws_region in config.yaml."
 
-// isRDSHostname reports whether host is an RDS endpoint name.
+// isRDSHostname reports whether host is an RDS instance or cluster endpoint
+// name. RDS Proxy endpoints are not looked up, so they do not count.
 func isRDSHostname(host string) bool {
-	return strings.HasSuffix(strings.ToLower(strings.TrimSuffix(host, ".")), ".rds.amazonaws.com")
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	return strings.HasSuffix(h, ".rds.amazonaws.com") && !strings.Contains(h, ".proxy-")
 }
 
 // databaseRunningResult judges the RDS status. Many statuses other than
@@ -237,7 +239,9 @@ func configKey(tc config.TunnelConfig) string {
 
 // networkResults runs the database, VPC, address and firewall checks.
 // haveInstance is false when the instance checks did not find one.
-func networkResults(ctx context.Context, tc config.TunnelConfig, d Deps, inst ec2.Instance, haveInstance bool) []Result {
+// rdsMissing is true when rds_endpoint is an RDS address that is not in this
+// account and region.
+func networkResults(ctx context.Context, tc config.TunnelConfig, d Deps, inst ec2.Instance, haveInstance bool) (results []Result, rdsMissing bool) {
 	db, isRDS, err := findDatabase(ctx, d.AWS, tc.RDSEndpoint)
 	if err != nil || !isRDS {
 		var out []Result
@@ -245,9 +249,9 @@ func networkResults(ctx context.Context, tc config.TunnelConfig, d Deps, inst ec
 		case err != nil:
 			out = append(out, awsFailure(checkDatabase, err, "rds", "describe-db-instances"))
 		case isRDSHostname(tc.RDSEndpoint):
-			out = append(out, Result{Check: checkDatabase, Status: Warn,
-				Message: fmt.Sprintf("%s is an RDS address, but lazy-ssm cannot find it in this account and region.", tc.RDSEndpoint),
-				Fix:     profileRegionFix})
+			rdsMissing = true
+			out = append(out, Result{Check: checkDatabase, Status: CouldNotCheck,
+				Message: fmt.Sprintf("%s is an RDS address, but lazy-ssm cannot find it in this account and region, so it used the address check instead.", tc.RDSEndpoint)})
 		default:
 			out = append(out, Result{Check: checkDatabase, Status: CouldNotCheck,
 				Message: fmt.Sprintf("%s is not an RDS database in this account and region, so lazy-ssm used the address check instead.", tc.RDSEndpoint)})
@@ -258,17 +262,17 @@ func networkResults(ctx context.Context, tc config.TunnelConfig, d Deps, inst ec
 			out = append(out, skipped(checkAddress)...)
 		}
 		return append(out, Result{Check: checkFirewall, Status: CouldNotCheck,
-			Message: "Skipped because the database is not an RDS database lazy-ssm could find."})
+			Message: "Skipped because the database is not an RDS database lazy-ssm could find."}), rdsMissing
 	}
 
 	out := []Result{{Check: checkDatabase, Status: Pass, Message: fmt.Sprintf("Found '%s' (%s).", db.ID, db.VPCID)}}
 	out = append(out, databaseRunningResult(db))
 	if !haveInstance {
-		return append(out, skipped(checkSameVPC, checkFirewall)...)
+		return append(out, skipped(checkSameVPC, checkFirewall)...), false
 	}
 
 	fw := firewallResult(ctx, tc, d.AWS, inst, db)
-	return append(out, sameVPCResult(tc, inst, db, fw), fw)
+	return append(out, sameVPCResult(tc, inst, db, fw), fw), false
 }
 
 func firewallResult(ctx context.Context, tc config.TunnelConfig, aws awscli.Runner, inst ec2.Instance, db dbTarget) Result {
