@@ -198,6 +198,35 @@ func isRDSHostname(host string) bool {
 	return strings.HasSuffix(strings.ToLower(strings.TrimSuffix(host, ".")), ".rds.amazonaws.com")
 }
 
+// databaseRunningResult judges the RDS status. Many statuses other than
+// "available" (backing-up, modifying, storage-optimization...) still serve
+// connections, so only clearly-down states fail.
+func databaseRunningResult(db dbTarget) Result {
+	down := []string{"stopped", "stopping", "starting", "rebooting", "failed", "deleting", "creating",
+		"insufficient-capacity", "restore-error", "storage-full"}
+	downPrefixes := []string{"inaccessible-encryption-credentials", "incompatible-"}
+	busy := []string{"upgrading", "maintenance", "renaming", "failing-over"}
+
+	isDown := false
+	for _, s := range down {
+		isDown = isDown || db.Status == s
+	}
+	for _, p := range downPrefixes {
+		isDown = isDown || strings.HasPrefix(db.Status, p)
+	}
+	if isDown {
+		return Result{Check: checkDatabaseRunning, Status: Fail,
+			Message: fmt.Sprintf("Database '%s' is not available (status: %s).", db.ID, db.Status)}
+	}
+	for _, s := range busy {
+		if db.Status == s {
+			return Result{Check: checkDatabaseRunning, Status: Warn,
+				Message: fmt.Sprintf("Database '%s' is busy (status: %s). Connections may fail until it finishes.", db.ID, db.Status)}
+		}
+	}
+	return Result{Check: checkDatabaseRunning, Status: Pass}
+}
+
 // configKey is the config setting that chose the instance.
 func configKey(tc config.TunnelConfig) string {
 	if tc.InstanceID != "" {
@@ -233,12 +262,7 @@ func networkResults(ctx context.Context, tc config.TunnelConfig, d Deps, inst ec
 	}
 
 	out := []Result{{Check: checkDatabase, Status: Pass, Message: fmt.Sprintf("Found '%s' (%s).", db.ID, db.VPCID)}}
-	if db.Status != "available" {
-		out = append(out, Result{Check: checkDatabaseRunning, Status: Fail,
-			Message: fmt.Sprintf("Database '%s' is not running (status: %s).", db.ID, db.Status)})
-	} else {
-		out = append(out, Result{Check: checkDatabaseRunning, Status: Pass})
-	}
+	out = append(out, databaseRunningResult(db))
 	if !haveInstance {
 		return append(out, skipped(checkSameVPC, checkFirewall)...)
 	}

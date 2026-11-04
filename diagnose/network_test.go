@@ -178,7 +178,7 @@ func TestRun_DatabaseStopped_Fails(t *testing.T) {
 	r := Run(context.Background(), stagingTunnel(), deps(aws))
 
 	head, ok := r.Headline()
-	if !ok || head.Check != "Database running" || head.Message != "Database 'stg' is not running (status: stopped)." {
+	if !ok || head.Check != "Database running" || head.Message != "Database 'stg' is not available (status: stopped)." {
 		t.Errorf("Headline = (%+v, %v)", head, ok)
 	}
 }
@@ -317,5 +317,47 @@ func TestRun_InstanceAndRDSDatabaseBothMissing_PointsAtProfile(t *testing.T) {
 	want := "Check aws_profile and aws_region in config.yaml. Neither the instance nor the database is in this account and region."
 	if head.Fix != want {
 		t.Errorf("fix = %q, want %q", head.Fix, want)
+	}
+}
+
+func TestDatabaseRunningResult(t *testing.T) {
+	tests := []struct {
+		status string
+		want   Status
+	}{
+		{"available", Pass},
+		{"backing-up", Pass},
+		{"storage-optimization", Pass},
+		{"modifying", Pass},
+		{"configuring-enhanced-monitoring", Pass},
+		{"resetting-master-credentials", Pass},
+		{"upgrading", Warn},
+		{"maintenance", Warn},
+		{"renaming", Warn},
+		{"failing-over", Warn},
+		{"stopped", Fail},
+		{"stopping", Fail},
+		{"starting", Fail},
+		{"rebooting", Fail},
+		{"failed", Fail},
+		{"deleting", Fail},
+		{"creating", Fail},
+		{"inaccessible-encryption-credentials-recoverable", Fail},
+		{"incompatible-network", Fail},
+		{"insufficient-capacity", Fail},
+		{"restore-error", Fail},
+		{"storage-full", Fail},
+	}
+	for _, tt := range tests {
+		got := databaseRunningResult(dbTarget{ID: "stg", Status: tt.status})
+		if got.Status != tt.want {
+			t.Errorf("%s: status = %v, want %v (%+v)", tt.status, got.Status, tt.want, got)
+		}
+	}
+	if got := databaseRunningResult(dbTarget{ID: "stg", Status: "stopped"}); got.Message != "Database 'stg' is not available (status: stopped)." {
+		t.Errorf("fail message = %q", got.Message)
+	}
+	if got := databaseRunningResult(dbTarget{ID: "stg", Status: "upgrading"}); got.Message != "Database 'stg' is busy (status: upgrading). Connections may fail until it finishes." {
+		t.Errorf("warn message = %q", got.Message)
 	}
 }
