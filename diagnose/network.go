@@ -191,6 +191,13 @@ func (p rawPermission) rule() sgRule {
 	return r
 }
 
+const profileRegionFix = "Check aws_profile and aws_region in config.yaml."
+
+// isRDSHostname reports whether host is an RDS endpoint name.
+func isRDSHostname(host string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSuffix(host, ".")), ".rds.amazonaws.com")
+}
+
 // configKey is the config setting that chose the instance.
 func configKey(tc config.TunnelConfig) string {
 	if tc.InstanceID != "" {
@@ -205,9 +212,14 @@ func networkResults(ctx context.Context, tc config.TunnelConfig, d Deps, inst ec
 	db, isRDS, err := findDatabase(ctx, d.AWS, tc.RDSEndpoint)
 	if err != nil || !isRDS {
 		var out []Result
-		if err != nil {
+		switch {
+		case err != nil:
 			out = append(out, awsFailure(checkDatabase, err, "rds", "describe-db-instances"))
-		} else {
+		case isRDSHostname(tc.RDSEndpoint):
+			out = append(out, Result{Check: checkDatabase, Status: Warn,
+				Message: fmt.Sprintf("%s is an RDS address, but lazy-ssm cannot find it in this account and region.", tc.RDSEndpoint),
+				Fix:     profileRegionFix})
+		default:
 			out = append(out, Result{Check: checkDatabase, Status: CouldNotCheck,
 				Message: fmt.Sprintf("%s is not an RDS database in this account and region, so lazy-ssm used the address check instead.", tc.RDSEndpoint)})
 		}

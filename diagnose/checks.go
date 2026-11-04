@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/antero-software/lazy-ssm/awscli"
 	"github.com/antero-software/lazy-ssm/config"
@@ -47,7 +48,34 @@ func Run(ctx context.Context, tc config.TunnelConfig, d Deps) Report {
 		rep.Results = append(rep.Results, skipped(checkSSM)...)
 	}
 	rep.Results = append(rep.Results, networkResults(ctx, tc, d, inst, found)...)
+	pointMissingInstanceAtProfile(&rep)
 	return rep
+}
+
+// pointMissingInstanceAtProfile changes the fix for a missing instance when
+// the RDS database is missing too: then the profile or region is the likely
+// mistake, not the instance name.
+func pointMissingInstanceAtProfile(rep *Report) {
+	dbMissing := false
+	for _, res := range rep.Results {
+		if res.Check == checkDatabase && res.Status == Warn && res.Fix == profileRegionFix {
+			dbMissing = true
+		}
+	}
+	if !dbMissing {
+		return
+	}
+	for i, res := range rep.Results {
+		if res.Check == checkInstance && res.Status == Fail && instanceMissing(res) {
+			rep.Results[i].Fix = profileRegionFix + " Neither the instance nor the database is in this account and region."
+		}
+	}
+}
+
+// instanceMissing reports whether an Instance failure means no instance was
+// found at all (as opposed to found but stopped or unusable).
+func instanceMissing(res Result) bool {
+	return strings.HasPrefix(res.Message, "No running instance matches") || strings.HasSuffix(res.Message, "was not found.")
 }
 
 func loginResult(ctx context.Context, d Deps) Result {

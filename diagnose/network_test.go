@@ -284,3 +284,38 @@ func TestRun_InstanceMissingStillChecksDatabase(t *testing.T) {
 		}
 	}
 }
+
+func TestRun_RDSAddressNotInAccount_WarnsProfileAndRegion(t *testing.T) {
+	aws := networkAWS(stgBastion, rulesAllowBastion)
+	tc := stagingTunnel()
+	tc.RDSEndpoint = "other.cluster-xyz.ap-southeast-2.rds.amazonaws.com"
+	d := deps(aws)
+	d.LookupHost = lookup()
+
+	r := Run(context.Background(), tc, d)
+
+	db, _ := resultFor(r, "Database")
+	if db.Status != Warn || db.Message != "other.cluster-xyz.ap-southeast-2.rds.amazonaws.com is an RDS address, but lazy-ssm cannot find it in this account and region." {
+		t.Errorf("Database = %+v", db)
+	}
+	if db.Fix != "Check aws_profile and aws_region in config.yaml." {
+		t.Errorf("fix = %q", db.Fix)
+	}
+}
+
+func TestRun_InstanceAndRDSDatabaseBothMissing_PointsAtProfile(t *testing.T) {
+	aws := networkAWS(`[]`, rulesAllowBastion)
+	tc := stagingTunnel()
+	tc.RDSEndpoint = "other.cluster-xyz.ap-southeast-2.rds.amazonaws.com"
+
+	r := Run(context.Background(), tc, deps(aws))
+
+	head, ok := r.Headline()
+	if !ok || head.Check != "Instance" || head.Status != Fail {
+		t.Fatalf("Headline = (%+v, %v), want the Instance failure", head, ok)
+	}
+	want := "Check aws_profile and aws_region in config.yaml. Neither the instance nor the database is in this account and region."
+	if head.Fix != want {
+		t.Errorf("fix = %q, want %q", head.Fix, want)
+	}
+}
