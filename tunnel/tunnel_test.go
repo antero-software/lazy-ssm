@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -424,5 +426,42 @@ func TestManagerStart_ListenErrorShowsProblem(t *testing.T) {
 	want := fmt.Sprintf("lazy-ssm cannot listen on local port %d. Another program may be using it.", port)
 	if rec.calls[0][1] != "Staging DB: cannot connect" || !strings.HasPrefix(rec.calls[0][2], want) {
 		t.Errorf("problem = %q", rec.calls[0])
+	}
+}
+
+func TestCloseTunnel_StopsChildProcesses(t *testing.T) {
+	rec := &problemRecorder{}
+	tun := testTunnel(rec)
+	pidFile := t.TempDir() + "/child.pid"
+
+	// Like aws starting session-manager-plugin: the child outlives a kill of the parent alone.
+	tun.mu.Lock()
+	err := tun.startProcess(exec.Command("sh", "-c", "sleep 60 & echo $! > "+pidFile+"; wait"))
+	tun.mu.Unlock()
+	if err != nil {
+		t.Fatalf("startProcess: %v", err)
+	}
+
+	var childPID int
+	deadline := time.Now().Add(2 * time.Second)
+	for childPID == 0 {
+		if b, err := os.ReadFile(pidFile); err == nil {
+			fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &childPID)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("child never started")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	tun.closeTunnel()
+
+	deadline = time.Now().Add(2 * time.Second)
+	for syscall.Kill(childPID, 0) == nil {
+		if time.Now().After(deadline) {
+			syscall.Kill(childPID, syscall.SIGKILL)
+			t.Fatalf("child process %d still running after closeTunnel", childPID)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

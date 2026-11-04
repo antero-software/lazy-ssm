@@ -234,7 +234,7 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 	}
 
 	// Timeout - kill the hung process; the exit goroutine will log and clean up
-	cmd.Process.Kill()
+	killProcessGroup(cmd)
 	t.tunnelCmd = nil
 	t.tunnelStartedAt.Store(0)
 
@@ -260,6 +260,9 @@ func (t *LazySSMTunnel) startProcess(cmd *exec.Cmd) error {
 	cmd.Stdout = pw
 	cmd.Stderr = pw
 	cmd.WaitDelay = processWaitDelay
+	// Own process group, so stopping the tunnel also stops the
+	// session-manager-plugin that aws starts (and its SSM session).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
 		pw.Close()
@@ -307,6 +310,13 @@ func (t *LazySSMTunnel) startProcess(cmd *exec.Cmd) error {
 		}
 	}()
 	return nil
+}
+
+// killProcessGroup kills the SSM process and every child it started.
+func killProcessGroup(cmd *exec.Cmd) {
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		cmd.Process.Kill()
+	}
 }
 
 // scanTunnelOutput reads the SSM process output, logging each line and highlighting
@@ -487,7 +497,7 @@ func (t *LazySSMTunnel) closeTunnel() {
 	}
 	log.Printf("[%s] Terminating SSM tunnel", t.config.Description)
 	t.stoppedCmd = cmd
-	cmd.Process.Kill()
+	killProcessGroup(cmd)
 	// The watcher closes exit before it takes t.mu, so waiting here while
 	// holding the lock cannot deadlock.
 	<-exit
