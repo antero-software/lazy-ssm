@@ -9,7 +9,9 @@ On-demand AWS Systems Manager tunnels to RDS databases through EC2 bastion insta
 - **Multiple Databases**: Manage multiple database tunnels simultaneously
 - **Multi-Account Support**: Per-tunnel AWS profile and region overrides for cross-account setups
 - **Instance Auto-Discovery**: Use wildcard patterns to find EC2 instances dynamically
-- **SSO Authentication**: Automatic detection and browser-based login for AWS SSO profiles
+- **SSO Authentication**: Detects expired AWS SSO logins and asks before opening the browser
+- **Pop-ups You Can See (macOS)**: Real dialog windows for things you must act on, not Notification Centre banners
+- **Connection Diagnosis**: When a connection fails, read-only AWS checks say which step broke and what to change
 - **Graceful Shutdown**: Clean termination of all tunnels on exit
 
 ## Prerequisites
@@ -90,6 +92,7 @@ lazy-ssm status        # show brew service status
 lazy-ssm tail          # show last 25 log lines
 lazy-ssm tail -n 50    # show last 50 log lines
 lazy-ssm version       # show version
+lazy-ssm diagnose      # check every tunnel (see "Diagnosing Connection Problems")
 ```
 
 Logs are written to `$(brew --prefix)/var/log/lazy-ssm.log`.
@@ -213,19 +216,96 @@ tunnels:
 
 ### AWS SSO Authentication
 
-The tunnel manager automatically detects when a profile requires SSO and handles login for you.
+The tunnel manager detects when a profile's SSO login has expired and asks before it logs in.
 
 1. Before starting a tunnel, it checks if the profile is authenticated
-2. If credentials are expired, it runs `aws sso login --profile <name>`
-3. Your browser opens to the AWS SSO login page
-4. After login, the tunnel starts automatically
+2. If the login has expired, a pop-up asks: "AWS login needed for profile '<name>'." with **Later** and **Log in**
+3. **Log in** runs `aws sso login --profile <name>`, and your browser opens to the AWS SSO login page
+4. **Later** (or no click within 2 minutes) cancels the connection. You are not asked again for that profile for 5 minutes
+5. Tunnels that share a profile share one pop-up and one login
+
+Your SQL client has usually given up by the time the login finishes. Connect again after the browser says the login is approved.
 
 ```
-[SSO] Profile 'production-sso' requires authentication. Opening SSO login page...
+[SSO] Profile 'production-sso' requires authentication (start URL: https://example.awsapps.com/start). Asking before opening the SSO login page...
 [SSO] Profile 'production-sso' successfully authenticated
 [Production DB] Discovering instance matching pattern: bastion-prod-*
 [Production DB] Discovered instance: i-0123456789abcdef0
 [Production DB] Starting SSM tunnel on port 13306...
+```
+
+## Pop-ups (macOS)
+
+lazy-ssm runs in the background, and macOS Notification Centre banners from background services are easy to miss or are hidden. So on macOS, lazy-ssm shows real dialog windows, but only when you must act:
+
+| Pop-up | When | Buttons |
+|---|---|---|
+| AWS login | An SSO login has expired | **Later**, **Log in** |
+| `<Tunnel>: cannot connect` | A connection failed. Shows the first failed check and what to change | **Show logs** (opens the log in Console), **OK** |
+| `<Tunnel>: cannot connect` | A tunnel cannot listen on its local port | **Show logs**, **OK** |
+
+Rules that stop pop-ups piling up:
+
+- One pop-up per tunnel on screen at a time.
+- The same problem for the same tunnel is not shown again for 2 minutes after you close it.
+- One login pop-up per AWS profile, even when several tunnels use it.
+- Normal events (tunnel started, idle tunnel closed, shutdown) only go to the log.
+
+No macOS permission is needed. If a dialog cannot be shown (for example, no one is logged in to the Mac), lazy-ssm falls back to a notification and, for SSO, starts the login straight away as before. On Linux, lazy-ssm keeps using `notify-send`.
+
+## Diagnosing Connection Problems
+
+When a connection through a tunnel fails, lazy-ssm runs these checks in the background, writes every result to the log, and shows the first problem in a pop-up:
+
+1. **AWS login**: is the profile logged in?
+2. **Instance**: does `instance_id` or `instance_pattern` find a running instance with an IAM instance profile? Warns when matches are in different VPCs.
+3. **SSM**: is the instance online in SSM?
+4. **Database**: is `rds_endpoint` an RDS instance or Aurora cluster (writer, reader or custom endpoint) in this account and region, and is it running?
+5. **Same VPC**: are the instance and the database in the same VPC? Different VPCs are only a warning when the database firewall lets the instance in (peered VPCs).
+6. **Address in instance VPC** (non-RDS targets such as ElastiCache or a raw IP): is the target address inside the instance's VPC?
+7. **Firewall** (RDS only): does a database security group allow the port from the instance?
+
+You can run the same checks yourself. This shows no pop-ups and never starts a login:
+
+```bash
+lazy-ssm diagnose                 # every tunnel
+lazy-ssm diagnose staging-db      # one tunnel
+```
+
+```
+staging-db (Staging DB)
+  PASS            AWS login
+  PASS            Instance: Using 'bastion-prod-1' (i-0123456789abcdef0, vpc-111).
+  PASS            SSM
+  PASS            Database: Found 'staging' (vpc-222).
+  PASS            Database running
+  FAIL            Same VPC: Instance 'bastion-prod-1' (vpc-111) is not in the same VPC as the database (vpc-222).
+                  Fix: Check instance_pattern in config.yaml.
+  FAIL            Firewall: Database security group sg-123 does not allow port 5432 from instance 'bastion-prod-1' (sg-456, 10.0.1.5).
+                  Fix: Check instance_pattern in config.yaml, or ask for an inbound rule on the database security group.
+```
+
+Exit code: `0` when nothing failed (warnings and "COULD NOT CHECK" are allowed), `1` when any check failed.
+
+### AWS Permissions for Diagnosis
+
+The checks only read from AWS. A check your role is not allowed to run shows "COULD NOT CHECK", and the other checks still run. In tightly scoped client accounts, adding these may need a change request:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "sts:GetCallerIdentity",
+    "ec2:DescribeInstances",
+    "ec2:DescribeSecurityGroups",
+    "ec2:DescribeVpcs",
+    "ssm:DescribeInstanceInformation",
+    "rds:DescribeDBInstances",
+    "rds:DescribeDBClusters",
+    "rds:DescribeDBClusterEndpoints"
+  ],
+  "Resource": "*"
+}
 ```
 
 ## How It Works
@@ -252,17 +332,25 @@ lazy-ssm/
 │   ├── root.go                # Root command and tunnel manager startup
 │   ├── status.go              # Service status via brew services
 │   ├── tail.go                # Log tail command
+│   ├── diagnose.go            # Connection diagnosis command
+│   ├── testdialog.go          # Hidden dialog test command
 │   └── version.go             # Version command
 ├── config/
 │   ├── config.go              # Configuration loading with Viper
 │   └── validation.go          # Configuration validation
 ├── tunnel/
 │   ├── tunnel.go              # Tunnel implementation and connection proxying
+│   ├── failure.go             # Failure detection and diagnosis pop-ups
 │   └── manager.go             # Tunnel lifecycle coordination
+├── diagnose/                  # Read-only AWS connection checks
+├── awscli/                    # AWS CLI runner
+├── notify/                    # Dialogs (macOS) and notifications (Linux)
+├── logfile/                   # Service log location
 ├── ec2/
 │   └── discovery.go           # EC2 instance discovery by Name tag pattern
 ├── sso/
-│   └── auth.go                # AWS SSO authentication handling
+│   ├── auth.go                # AWS SSO authentication handling
+│   └── gate.go                # One login prompt per profile, pause after Later
 └── .github/
     └── workflows/
         ├── release.yml         # Release workflow
@@ -275,6 +363,9 @@ lazy-ssm/
 - **AWS Credentials**: Never commit AWS credentials. Use AWS CLI profiles or IAM roles
 - **Network Exposure**: Tunnels listen on `localhost` by default to prevent external access
 - **Port Permissions**: Use ports ≥1024 to avoid requiring root privileges
+- **Log Contents**: Diagnosis writes private IP addresses, security group IDs, VPC IDs and CIDR ranges to the log (`$(brew --prefix)/var/log/lazy-ssm.log`). The Homebrew log can be readable by other local users, so treat it as internal. Caller identity (role ARNs, email addresses) is never written by diagnosis
+- **Read-Only Checks**: Diagnosis only calls AWS read actions (listed above). It never changes AWS resources or runs commands on instances
+- **SSM Sessions**: Stopping a tunnel (idle, reload or shutdown) also stops its `session-manager-plugin`, so no SSM session is left open on the bastion
 
 ## Troubleshooting
 
@@ -307,9 +398,10 @@ lazy-ssm --config ~/.lazy-ssm/config.yaml  # run in foreground to see errors dir
 2. Try manual login first: `aws sso login --profile <name>`
 3. Verify SSO session hasn't been revoked in AWS IAM Identity Center
 
-### Connection refused
+### Connection refused or connection lost
 
-1. Check `lazy-ssm tail` for tunnel startup errors
+1. Run `lazy-ssm diagnose <tunnel>` to see which step fails
+2. Check `lazy-ssm tail` for tunnel startup errors
 2. Ensure the RDS endpoint is correct
 3. Verify security groups allow traffic from the bastion instance
 
