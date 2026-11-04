@@ -45,6 +45,7 @@ func init() {
 	RootCmd.AddCommand(statusCmd)
 	RootCmd.AddCommand(tailCmd)
 	RootCmd.AddCommand(versionCmd)
+	RootCmd.AddCommand(testDialogCmd)
 }
 
 func runTunnelManager(_ *cobra.Command, _ []string) error {
