@@ -376,3 +376,17 @@ func TestDatabaseRunningResult(t *testing.T) {
 		t.Errorf("warn message = %q", got.Message)
 	}
 }
+
+func TestRun_PrefixListRuleIsCouldNotCheck(t *testing.T) {
+	rules := `[{"IpProtocol":"tcp","FromPort":5432,"ToPort":5432,"UserIdGroupPairs":[],"IpRanges":[],"PrefixListIds":[{"PrefixListId":"pl-0abc"}]}]`
+
+	r := Run(context.Background(), stagingTunnel(), deps(networkAWS(stgBastion, rules)))
+
+	fw, _ := resultFor(r, "Firewall")
+	if fw.Status != CouldNotCheck || fw.Message != "A database security group rule for port 5432 uses a managed prefix list, which lazy-ssm cannot check." {
+		t.Errorf("Firewall = %+v", fw)
+	}
+	if r.HasFail() {
+		t.Errorf("HasFail = true; a prefix-list rule must not become a firewall failure: %+v", r.Results)
+	}
+}

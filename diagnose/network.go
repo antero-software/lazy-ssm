@@ -124,14 +124,14 @@ type sgRule struct {
 	FromPort, ToPort int
 	SourceGroupIDs   []string
 	CIDRs            []string
+	PrefixLists      bool // the rule has managed prefix list sources
 }
 
 // allowsFrom reports whether any rule lets TCP traffic on port in from one of
 // srcGroups or from srcIP.
 func allowsFrom(rules []sgRule, port int, srcGroups []string, srcIP string) bool {
 	for _, r := range rules {
-		portOK := r.Protocol == "-1" || (r.Protocol == "tcp" && r.FromPort <= port && port <= r.ToPort)
-		if !portOK {
+		if !r.coversPort(port) {
 			continue
 		}
 		for _, g := range r.SourceGroupIDs {
@@ -146,6 +146,11 @@ func allowsFrom(rules []sgRule, port int, srcGroups []string, srcIP string) bool
 		}
 	}
 	return false
+}
+
+// coversPort reports whether the rule applies to TCP traffic on port.
+func (r sgRule) coversPort(port int) bool {
+	return r.Protocol == "-1" || (r.Protocol == "tcp" && r.FromPort <= port && port <= r.ToPort)
 }
 
 // ipInCIDRs reports whether ip is inside any of cidrs.
@@ -172,6 +177,9 @@ type rawPermission struct {
 	IpRanges []struct {
 		CidrIp string `json:"CidrIp"`
 	} `json:"IpRanges"`
+	PrefixListIds []struct {
+		PrefixListId string `json:"PrefixListId"`
+	} `json:"PrefixListIds"`
 }
 
 func (p rawPermission) rule() sgRule {
@@ -188,6 +196,7 @@ func (p rawPermission) rule() sgRule {
 	for _, c := range p.IpRanges {
 		r.CIDRs = append(r.CIDRs, c.CidrIp)
 	}
+	r.PrefixLists = len(p.PrefixListIds) > 0
 	return r
 }
 
@@ -288,6 +297,12 @@ func firewallResult(ctx context.Context, tc config.TunnelConfig, aws awscli.Runn
 	}
 	if allowsFrom(rules, tc.RDSPort, inst.SecurityGroupIDs, inst.PrivateIP) {
 		return Result{Check: checkFirewall, Status: Pass}
+	}
+	for _, r := range rules {
+		if r.PrefixLists && r.coversPort(tc.RDSPort) {
+			return Result{Check: checkFirewall, Status: CouldNotCheck,
+				Message: fmt.Sprintf("A database security group rule for port %d uses a managed prefix list, which lazy-ssm cannot check.", tc.RDSPort)}
+		}
 	}
 	return Result{
 		Check:  checkFirewall,
