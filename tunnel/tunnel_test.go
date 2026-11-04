@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -518,5 +519,27 @@ func TestReportFailure_SkippedDuringShutdown(t *testing.T) {
 
 	if diag.count() != 0 || rec.count() != 0 {
 		t.Errorf("diagnoses = %d, problems = %d during shutdown, want 0 and 0", diag.count(), rec.count())
+	}
+}
+
+func TestScanTunnelOutput_LongLineDoesNotStopReading(t *testing.T) {
+	tun := testTunnel(&problemRecorder{})
+	pr, pw := io.Pipe()
+
+	written := make(chan error, 1)
+	go func() {
+		_, err := pw.Write([]byte(strings.Repeat("x", 70*1024) + "\nafter\n"))
+		pw.Close()
+		written <- err
+	}()
+	go tun.scanTunnelOutput(pr)
+
+	select {
+	case err := <-written:
+		if err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("writer blocked: scanTunnelOutput stopped reading after a long line")
 	}
 }

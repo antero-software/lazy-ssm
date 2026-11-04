@@ -340,6 +340,12 @@ func (t *LazySSMTunnel) scanTunnelOutput(r io.Reader) {
 			log.Printf("[%s] SSM: %s", t.config.Description, line)
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("[%s] SSM output not logged: %v", t.config.Description, err)
+	}
+	// Keep reading so the SSM process can never block on a full pipe (and
+	// Wait, and so closeTunnel, can never hang).
+	io.Copy(io.Discard, r)
 }
 
 // handleConnection handles a client connection
