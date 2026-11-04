@@ -1,10 +1,6 @@
 package tunnel
 
-import (
-	"testing"
-
-	"github.com/antero-software/lazy-ssm/ec2"
-)
+import "testing"
 
 func TestShouldCloseIdle(t *testing.T) {
 	const (
@@ -87,17 +83,5 @@ func TestShouldCloseIdle(t *testing.T) {
 				t.Errorf("shouldCloseIdle() = %v, want %v", got, tc.want)
 			}
 		})
-	}
-}
-
-func TestDescribeEligible(t *testing.T) {
-	got := describeEligible([]ec2.Instance{
-		{ID: "i-1", Name: "bastion-prod-1", VPCID: "vpc-111", HasIAMProfile: true},
-		{ID: "i-2", Name: "no-profile", VPCID: "vpc-111"},
-		{ID: "i-3", Name: "bastion-stg-1", VPCID: "vpc-222", HasIAMProfile: true},
-	})
-	want := "bastion-prod-1 (i-1, vpc-111), bastion-stg-1 (i-3, vpc-222)"
-	if got != want {
-		t.Errorf("describeEligible = %q, want %q", got, want)
 	}
 }

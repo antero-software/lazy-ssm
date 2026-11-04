@@ -2,9 +2,12 @@ package ec2
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/antero-software/lazy-ssm/awscli"
 )
 
 const twoInstances = `[
@@ -73,5 +76,40 @@ func TestListCandidates_QueriesRunningInstancesByName(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("args %q missing %q", joined, want)
 		}
+	}
+}
+
+type fixedRunner struct {
+	out string
+	err error
+}
+
+func (r fixedRunner) Run(context.Context, ...string) ([]byte, error) { return []byte(r.out), r.err }
+
+func TestDescribeInstance_NotFound(t *testing.T) {
+	empty := NewInstanceDiscoveryWithRunner(fixedRunner{out: `[]`})
+	if _, err := empty.DescribeInstance(context.Background(), "i-0abc"); !errors.Is(err, ErrInstanceNotFound) {
+		t.Errorf("empty result err = %v, want ErrInstanceNotFound", err)
+	}
+
+	invalid := NewInstanceDiscoveryWithRunner(fixedRunner{err: &awscli.Error{
+		Args:   []string{"ec2", "describe-instances"},
+		Stderr: "An error occurred (InvalidInstanceID.NotFound) when calling the DescribeInstances operation",
+		Err:    errors.New("exit status 254"),
+	}})
+	if _, err := invalid.DescribeInstance(context.Background(), "i-0abc"); !errors.Is(err, ErrInstanceNotFound) {
+		t.Errorf("InvalidInstanceID err = %v, want ErrInstanceNotFound", err)
+	}
+}
+
+func TestFormatEligible(t *testing.T) {
+	got := FormatEligible([]Instance{
+		{ID: "i-1", Name: "bastion-prod-1", VPCID: "vpc-111", HasIAMProfile: true},
+		{ID: "i-2", Name: "no-profile", VPCID: "vpc-111"},
+		{ID: "i-3", Name: "bastion-stg-1", VPCID: "vpc-222", HasIAMProfile: true},
+	})
+	want := "bastion-prod-1 (i-1, vpc-111), bastion-stg-1 (i-3, vpc-222)"
+	if got != want {
+		t.Errorf("FormatEligible = %q, want %q", got, want)
 	}
 }

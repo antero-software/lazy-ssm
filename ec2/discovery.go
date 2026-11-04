@@ -3,13 +3,18 @@ package ec2
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/antero-software/lazy-ssm/awscli"
 )
 
 // instanceQuery flattens describe-instances output to the fields lazy-ssm uses.
 const instanceQuery = "Reservations[].Instances[].{ID:InstanceId,Name:Tags[?Key=='Name']|[0].Value,VPC:VpcId,IP:PrivateIpAddress,State:State.Name,SGs:SecurityGroups[].GroupId,Profile:IamInstanceProfile.Arn}"
+
+// ErrInstanceNotFound means no instance has the requested ID.
+var ErrInstanceNotFound = errors.New("instance not found")
 
 // Instance is one EC2 instance, with the details tunnels and diagnosis need.
 type Instance struct {
@@ -56,6 +61,10 @@ func (d *InstanceDiscovery) DescribeInstance(ctx context.Context, id string) (In
 		"--query", instanceQuery,
 		"--output", "json",
 	)
+	var cliErr *awscli.Error
+	if errors.As(err, &cliErr) && strings.Contains(cliErr.Stderr, "InvalidInstanceID") {
+		return Instance{}, fmt.Errorf("instance %s: %w", id, ErrInstanceNotFound)
+	}
 	if err != nil {
 		return Instance{}, fmt.Errorf("failed to describe instance %s: %w", id, err)
 	}
@@ -64,7 +73,7 @@ func (d *InstanceDiscovery) DescribeInstance(ctx context.Context, id string) (In
 		return Instance{}, err
 	}
 	if len(instances) == 0 {
-		return Instance{}, fmt.Errorf("instance %s not found", id)
+		return Instance{}, fmt.Errorf("instance %s: %w", id, ErrInstanceNotFound)
 	}
 	return instances[0], nil
 }
@@ -82,6 +91,18 @@ func PickSSMCandidate(c []Instance) (chosen Instance, eligible int, ok bool) {
 		eligible++
 	}
 	return chosen, eligible, eligible > 0
+}
+
+// FormatEligible lists the candidates that have an IAM instance profile as
+// "name (id, vpc), ...".
+func FormatEligible(candidates []Instance) string {
+	var parts []string
+	for _, c := range candidates {
+		if c.HasIAMProfile {
+			parts = append(parts, fmt.Sprintf("%s (%s, %s)", c.Name, c.ID, c.VPCID))
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 type rawInstance struct {

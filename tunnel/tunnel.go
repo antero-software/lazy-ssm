@@ -98,7 +98,7 @@ func (t *LazySSMTunnel) resolveInstanceID(ctx context.Context) (string, error) {
 	}
 	if eligible > 1 {
 		log.Printf("[%s] WARNING: %d instances match '%s': %s. Using %s (%s).",
-			t.config.Description, eligible, t.config.InstancePattern, describeEligible(candidates), chosen.Name, chosen.ID)
+			t.config.Description, eligible, t.config.InstancePattern, ec2.FormatEligible(candidates), chosen.Name, chosen.ID)
 	}
 	instanceID := chosen.ID
 
@@ -107,17 +107,6 @@ func (t *LazySSMTunnel) resolveInstanceID(ctx context.Context) (string, error) {
 	// Cache the resolved ID
 	t.resolvedInstID = instanceID
 	return instanceID, nil
-}
-
-// describeEligible lists the SSM-eligible candidates as "name (id, vpc), ...".
-func describeEligible(candidates []ec2.Instance) string {
-	var parts []string
-	for _, c := range candidates {
-		if c.HasIAMProfile {
-			parts = append(parts, fmt.Sprintf("%s (%s, %s)", c.Name, c.ID, c.VPCID))
-		}
-	}
-	return strings.Join(parts, ", ")
 }
 
 // ensureTunnel starts the SSM tunnel if not running
