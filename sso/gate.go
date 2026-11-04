@@ -16,6 +16,8 @@ var (
 	// ErrLoginPaused means the user clicked Later less than 5 minutes ago,
 	// so no new prompt was shown.
 	ErrLoginPaused = errors.New("AWS login paused after Later")
+	// ErrLoginAborted means lazy-ssm was stopping while it asked.
+	ErrLoginAborted = errors.New("AWS login cancelled because lazy-ssm is stopping")
 )
 
 // sharedGate is used by every AuthChecker, so tunnels that share a profile

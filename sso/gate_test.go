@@ -162,3 +162,19 @@ func TestPromptAndLogin_LoginErrorDoesNotPause(t *testing.T) {
 		t.Errorf("ask calls = %d, want 2 (no pause after a failed login)", got)
 	}
 }
+
+func TestPromptAndLogin_AbortRunsNoLoginAndDoesNotPause(t *testing.T) {
+	h := newChecker(notify.LoginAbort, nil, nil)
+
+	err := h.checker.promptAndLogin(context.Background(), "staging")
+	if !errors.Is(err, ErrLoginAborted) {
+		t.Fatalf("err = %v, want ErrLoginAborted", err)
+	}
+	if got := h.loginCall.Load(); got != 0 {
+		t.Errorf("login calls = %d, want 0", got)
+	}
+	_ = h.checker.promptAndLogin(context.Background(), "staging")
+	if got := h.askCalls.Load(); got != 2 {
+		t.Errorf("ask calls = %d, want 2 (an abort must not pause the profile)", got)
+	}
+}

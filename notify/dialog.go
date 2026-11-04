@@ -3,12 +3,18 @@ package notify
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
+
+// ErrDialogInterrupted means the dialog was closed by a signal (shutdown,
+// Ctrl-C), not by the user or a problem showing it.
+var ErrDialogInterrupted = errors.New("dialog interrupted")
 
 // DialogSpec describes one modal dialog window.
 type DialogSpec struct {
@@ -104,6 +110,17 @@ func parseDialogOutput(out string) (DialogResult, error) {
 	}
 }
 
+// classifyRunError marks a process killed by a signal as ErrDialogInterrupted.
+func classifyRunError(err error) error {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			return fmt.Errorf("%w (%v)", ErrDialogInterrupted, err)
+		}
+	}
+	return err
+}
+
 // OSAScriptRunner shows dialogs with osascript on macOS.
 type OSAScriptRunner struct{ Mode DialogMode }
 
@@ -114,7 +131,7 @@ func (r OSAScriptRunner) Show(ctx context.Context, d DialogSpec) (DialogResult, 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return DialogResult{}, fmt.Errorf("osascript dialog (%s): %w: %s", r.Mode, err, strings.TrimSpace(stderr.String()))
+		return DialogResult{}, fmt.Errorf("osascript dialog (%s): %w: %s", r.Mode, classifyRunError(err), strings.TrimSpace(stderr.String()))
 	}
 	return parseDialogOutput(stdout.String())
 }

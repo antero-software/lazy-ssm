@@ -1,6 +1,8 @@
 package notify
 
 import (
+	"errors"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
@@ -95,5 +97,17 @@ func TestParseDialogOutput(t *testing.T) {
 				t.Errorf("got %+v, want %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestClassifyRunError_SignalMeansInterrupted(t *testing.T) {
+	err := exec.Command("sh", "-c", "kill -INT $$").Run()
+	if !errors.Is(classifyRunError(err), ErrDialogInterrupted) {
+		t.Errorf("signal exit = %v, want ErrDialogInterrupted", classifyRunError(err))
+	}
+
+	err = exec.Command("sh", "-c", "exit 1").Run()
+	if errors.Is(classifyRunError(err), ErrDialogInterrupted) {
+		t.Error("a normal failure exit must not count as interrupted")
 	}
 }

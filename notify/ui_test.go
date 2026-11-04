@@ -3,6 +3,7 @@ package notify
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
@@ -261,5 +262,29 @@ func waitForShows(t *testing.T, r *fakeRunner, n int) {
 			t.Fatalf("timed out waiting for %d shows, have %d", n, r.count())
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestAskLogin_CancelledContextAborts(t *testing.T) {
+	h := newHarness(&fakeRunner{err: errors.New("signal: killed")})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if got := h.ui.AskLogin(ctx, "p"); got != LoginAbort {
+		t.Errorf("AskLogin = %v, want LoginAbort", got)
+	}
+	if len(*h.fallback) != 0 {
+		t.Errorf("fallback notifications = %d, want 0 (no login on shutdown)", len(*h.fallback))
+	}
+}
+
+func TestAskLogin_InterruptedDialogAborts(t *testing.T) {
+	h := newHarness(&fakeRunner{err: fmt.Errorf("osascript dialog: %w", ErrDialogInterrupted)})
+
+	if got := h.ui.AskLogin(context.Background(), "p"); got != LoginAbort {
+		t.Errorf("AskLogin = %v, want LoginAbort", got)
+	}
+	if len(*h.fallback) != 0 {
+		t.Errorf("fallback notifications = %d, want 0", len(*h.fallback))
 	}
 }

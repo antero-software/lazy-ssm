@@ -2,6 +2,7 @@ package notify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os/exec"
@@ -29,6 +30,9 @@ type LoginChoice int
 const (
 	LoginNow LoginChoice = iota
 	LoginLater
+	// LoginAbort means lazy-ssm is stopping: do not log in, and do not
+	// treat it as Later.
+	LoginAbort
 )
 
 // UI shows the dialogs the user must act on and stops them from piling up.
@@ -63,6 +67,9 @@ func NewUI(runner DialogRunner, fallback *Notifier, openLogs func() error, now f
 // can be shown, it notifies and returns LoginNow, which keeps the old
 // behaviour of starting the login straight away.
 func (u *UI) AskLogin(ctx context.Context, profile string) LoginChoice {
+	if ctx.Err() != nil {
+		return LoginAbort
+	}
 	if u.runner == nil {
 		u.fallback.SSO(profile, "")
 		return LoginNow
@@ -76,6 +83,10 @@ func (u *UI) AskLogin(ctx context.Context, profile string) LoginChoice {
 		GiveUpAfter: loginGiveUp,
 	})
 	if err != nil {
+		if ctx.Err() != nil || errors.Is(err, ErrDialogInterrupted) {
+			log.Printf("[notify] login dialog closed while stopping: %v", err)
+			return LoginAbort
+		}
 		log.Printf("[notify] dialog unavailable: %v", err)
 		u.fallback.SSO(profile, "")
 		return LoginNow

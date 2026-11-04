@@ -191,9 +191,12 @@ func ssoSessionURL(sessionName string) string {
 // Tunnels that share a profile share one prompt and one login.
 func (a *AuthChecker) promptAndLogin(ctx context.Context, profile string) error {
 	return a.gate.do(profile, func() (bool, error) {
-		if a.ask(ctx, profile) == notify.LoginLater {
+		switch a.ask(ctx, profile) {
+		case notify.LoginLater:
 			log.Printf("[SSO] User chose Later for profile '%s'. No new prompt for %v.", profile, loginPause)
 			return true, nil
+		case notify.LoginAbort:
+			return false, ErrLoginAborted
 		}
 		return false, a.login(ctx, profile)
 	})

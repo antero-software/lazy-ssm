@@ -42,6 +42,8 @@ type LazySSMTunnel struct {
 
 	// problem shows a pop-up the user must act on (notify.Problem in production).
 	problem func(tunnel, title, message string)
+	// checkLogin checks the AWS login and asks to log in (sso.CheckProfile in production).
+	checkLogin func(ctx context.Context, cliPath, profile, region string) error
 
 	// runDiagnosis runs the AWS checks (defaultDiagnosis in production).
 	runDiagnosis  func(ctx context.Context) diagnose.Report
@@ -81,6 +83,7 @@ func NewLazySSMTunnel(tunnelConfig config.TunnelConfig, appConfig *config.Config
 		config:     tunnelConfig,
 		appConfig:  appConfig,
 		problem:    notify.Problem,
+		checkLogin: sso.CheckProfile,
 		tunnelPort: tunnelConfig.LocalPort + appConfig.Network.TunnelPortOffset,
 	}
 	t.runDiagnosis = t.defaultDiagnosis
@@ -132,7 +135,7 @@ func (t *LazySSMTunnel) resolveInstanceID(ctx context.Context) (string, error) {
 }
 
 // ensureTunnel starts the SSM tunnel if not running
-func (t *LazySSMTunnel) ensureTunnel() error {
+func (t *LazySSMTunnel) ensureTunnel(ctx context.Context) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -164,8 +167,7 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 	region := t.appConfig.RegionFor(t.config)
 
 	// Check SSO authentication before proceeding
-	ctx := context.Background()
-	if err := sso.CheckProfile(ctx, t.appConfig.AWS.CLIPath, profile, region); err != nil {
+	if err := t.checkLogin(ctx, t.appConfig.AWS.CLIPath, profile, region); err != nil {
 		return fmt.Errorf("SSO authentication failed: %w", err)
 	}
 
@@ -210,6 +212,12 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 	for time.Since(startTime) < readyTimeout {
 		// Check for early process exit before polling the port
 		select {
+		case <-ctx.Done():
+			// lazy-ssm is stopping; the exit watcher logs and cleans up.
+			killProcessGroup(cmd)
+			t.tunnelCmd = nil
+			t.tunnelStartedAt.Store(0)
+			return ctx.Err()
 		case <-exitCh:
 			t.tunnelCmd = nil
 			t.tunnelStartedAt.Store(0)
@@ -349,7 +357,7 @@ func (t *LazySSMTunnel) scanTunnelOutput(r io.Reader) {
 }
 
 // handleConnection handles a client connection
-func (t *LazySSMTunnel) handleConnection(clientConn net.Conn) {
+func (t *LazySSMTunnel) handleConnection(ctx context.Context, clientConn net.Conn) {
 	defer clientConn.Close()
 
 	t.connections.Add(1)
@@ -359,7 +367,7 @@ func (t *LazySSMTunnel) handleConnection(clientConn net.Conn) {
 	log.Printf("[%s] New connection from %s", t.config.Description, clientAddr)
 
 	// Ensure tunnel is running
-	if err := t.ensureTunnel(); err != nil {
+	if err := t.ensureTunnel(ctx); err != nil {
 		log.Printf("[%s] Failed to ensure tunnel: %v", t.config.Description, err)
 		t.reportFailure(err, triggerStart)
 		return
@@ -451,7 +459,7 @@ func (t *LazySSMTunnel) Start(ctx context.Context) error {
 			}
 		}
 
-		go t.handleConnection(conn)
+		go t.handleConnection(ctx, conn)
 	}
 }
 

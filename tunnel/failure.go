@@ -75,7 +75,8 @@ func (t *LazySSMTunnel) reportFailure(cause error, trigger failureTrigger) {
 	if t.stopping.Load() {
 		return
 	}
-	if errors.Is(cause, sso.ErrLoginDeclined) || errors.Is(cause, sso.ErrLoginPaused) {
+	if errors.Is(cause, sso.ErrLoginDeclined) || errors.Is(cause, sso.ErrLoginPaused) ||
+		errors.Is(cause, sso.ErrLoginAborted) || errors.Is(cause, context.Canceled) {
 		log.Printf("[%s] Not diagnosing: %v", name, cause)
 		return
 	}

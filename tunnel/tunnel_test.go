@@ -543,3 +543,52 @@ func TestScanTunnelOutput_LongLineDoesNotStopReading(t *testing.T) {
 		t.Fatal("writer blocked: scanTunnelOutput stopped reading after a long line")
 	}
 }
+
+func TestStart_CancelDuringLoginReturnsPromptly(t *testing.T) {
+	free, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := free.Addr().(*net.TCPAddr).Port
+	free.Close()
+
+	cfg := &config.Config{
+		Network:  config.NetworkConfig{ListenAddress: "127.0.0.1", TunnelPortOffset: 10000},
+		Timeouts: config.TimeoutConfig{IdleCheck: time.Hour, Shutdown: 2 * time.Second, ShutdownPoll: 10 * time.Millisecond},
+	}
+	tun := NewLazySSMTunnel(config.TunnelConfig{Name: "staging-db", LocalPort: port, InstanceID: "i-1"}, cfg)
+	rec := &problemRecorder{}
+	tun.problem = rec.record
+	entered := make(chan struct{})
+	tun.checkLogin = func(ctx context.Context, _, _, _ string) error {
+		close(entered) // the login dialog is "open"
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { tun.Start(ctx); close(done) }()
+
+	var conn net.Conn
+	for i := 0; i < 100 && conn == nil; i++ {
+		conn, _ = net.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)))
+		time.Sleep(10 * time.Millisecond)
+	}
+	if conn == nil {
+		t.Fatal("could not connect to the tunnel")
+	}
+	defer conn.Close()
+	<-entered
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not return while a login was waiting")
+	}
+	tun.diagWG.Wait()
+	if rec.count() != 0 {
+		t.Errorf("problems = %q, want none on shutdown", rec.calls)
+	}
+}
