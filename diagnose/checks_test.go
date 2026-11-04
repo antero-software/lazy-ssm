@@ -2,8 +2,11 @@ package diagnose
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/antero-software/lazy-ssm/awscli"
 )
 
 func TestRun_LoginFailSkipsTheRest(t *testing.T) {
@@ -169,7 +172,7 @@ func TestRun_SSMOnlinePasses(t *testing.T) {
 }
 
 func TestRun_AccessDeniedIsCouldNotCheckAndLeaksNothing(t *testing.T) {
-	aws := newFakeAWS().on("sts get-caller-identity", callerIdentity).on("ec2 describe-instances", oneBastion).
+	aws := networkAWS(stgBastion, rulesAllowBastion).
 		fail("ssm describe-instance-information", accessDenied("ssm", "describe-instance-information"))
 
 	r := Run(context.Background(), stagingTunnel(), deps(aws))
@@ -178,11 +181,7 @@ func TestRun_AccessDeniedIsCouldNotCheckAndLeaksNothing(t *testing.T) {
 	if ssm.Status != CouldNotCheck || ssm.Message != "Your AWS role is not allowed to run ssm describe-instance-information." {
 		t.Errorf("SSM = %+v", ssm)
 	}
-	ssmIndex := -1
-	for i, res := range r.Results {
-		if res.Check == "SSM" {
-			ssmIndex = i
-		}
+	for _, res := range r.Results {
 		for _, text := range []string{res.Message, res.Fix} {
 			if strings.Contains(text, "arn:") || strings.Contains(text, "@") {
 				t.Errorf("result %q leaks caller identity: %q", res.Check, text)
@@ -194,14 +193,14 @@ func TestRun_AccessDeniedIsCouldNotCheckAndLeaksNothing(t *testing.T) {
 			t.Errorf("log line leaks caller identity: %q", line)
 		}
 	}
-	if ssmIndex == len(r.Results)-1 {
-		t.Log("no checks after SSM yet (added in Task 6)")
+	if db, _ := resultFor(r, "Database"); db.Status != Pass {
+		t.Errorf("Database = %+v, want later checks to still run", db)
 	}
 }
 
 func TestRun_OtherAWSErrorIsCouldNotCheck(t *testing.T) {
 	aws := newFakeAWS().on("sts get-caller-identity", callerIdentity).
-		fail("ec2 describe-instances", expiredLogin())
+		fail("ec2 describe-instances", &awscli.Error{Args: []string{"ec2", "describe-instances"}, Stderr: "Could not connect to the endpoint URL", Err: errors.New("exit status 255")})
 
 	r := Run(context.Background(), stagingTunnel(), deps(aws))
 

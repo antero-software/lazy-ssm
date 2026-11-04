@@ -34,7 +34,7 @@ func Run(ctx context.Context, tc config.TunnelConfig, d Deps) Report {
 	login := loginResult(ctx, d)
 	rep.Results = append(rep.Results, login)
 	if login.Status == Fail {
-		rep.Results = append(rep.Results, skipped(checkInstance, checkSSM)...)
+		rep.Results = append(rep.Results, skipped(checkInstance, checkSSM, checkDatabase, checkSameVPC, checkFirewall)...)
 		return rep
 	}
 
@@ -46,6 +46,7 @@ func Run(ctx context.Context, tc config.TunnelConfig, d Deps) Report {
 	} else {
 		rep.Results = append(rep.Results, skipped(checkSSM)...)
 	}
+	rep.Results = append(rep.Results, networkResults(ctx, tc, d, inst, found)...)
 	return rep
 }
 
@@ -166,6 +167,10 @@ func ssmResult(ctx context.Context, aws awscli.Runner, instanceID string) Result
 // awsFailure turns a failed AWS call into a CouldNotCheck result. It never
 // includes AWS stderr, which can contain the caller's ARN and email.
 func awsFailure(check string, err error, service, operation string) Result {
+	var cliErr *awscli.Error
+	if errors.As(err, &cliErr) && len(cliErr.Args) >= 2 {
+		service, operation = cliErr.Args[0], cliErr.Args[1]
+	}
 	msg := fmt.Sprintf("AWS call failed: %s %s.", service, operation)
 	if awscli.IsAccessDenied(err) {
 		msg = fmt.Sprintf("Your AWS role is not allowed to run %s %s.", service, operation)
