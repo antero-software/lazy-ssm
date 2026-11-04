@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,7 +42,7 @@ type LazySSMTunnel struct {
 func findFreePort(listenAddr string, startPort int) (int, error) {
 	for i := 0; i < maxPortAttempts; i++ {
 		port := startPort + i
-		addr := fmt.Sprintf("%s:%d", listenAddr, port)
+		addr := net.JoinHostPort(listenAddr, strconv.Itoa(port))
 
 		// Try to listen on the port
 		listener, err := net.Listen("tcp", addr)
@@ -81,29 +82,42 @@ func (t *LazySSMTunnel) resolveInstanceID(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("neither instance_id nor instance_pattern specified")
 	}
 
-	// Determine which AWS profile/region to use
-	profile := t.config.AWSProfile
-	if profile == "" {
-		profile = t.appConfig.AWS.Profile
-	}
-	region := t.config.AWSRegion
-	if region == "" {
-		region = t.appConfig.AWS.Region
-	}
+	profile := t.appConfig.ProfileFor(t.config)
+	region := t.appConfig.RegionFor(t.config)
 
 	log.Printf("[%s] Discovering instance matching pattern: %s", t.config.Description, t.config.InstancePattern)
 
 	discovery := ec2.NewInstanceDiscovery(t.appConfig.AWS.CLIPath, profile, region)
-	instanceID, err := discovery.FindInstanceWithSSM(ctx, t.config.InstancePattern)
+	candidates, err := discovery.ListCandidates(ctx, t.config.InstancePattern)
 	if err != nil {
 		return "", fmt.Errorf("failed to discover instance: %w", err)
 	}
+	chosen, eligible, ok := ec2.PickSSMCandidate(candidates)
+	if !ok {
+		return "", fmt.Errorf("failed to discover instance: no running SSM-managed instance found matching pattern: %s", t.config.InstancePattern)
+	}
+	if eligible > 1 {
+		log.Printf("[%s] WARNING: %d instances match '%s': %s. Using %s (%s).",
+			t.config.Description, eligible, t.config.InstancePattern, describeEligible(candidates), chosen.Name, chosen.ID)
+	}
+	instanceID := chosen.ID
 
 	log.Printf("[%s] Discovered instance: %s", t.config.Description, instanceID)
 
 	// Cache the resolved ID
 	t.resolvedInstID = instanceID
 	return instanceID, nil
+}
+
+// describeEligible lists the SSM-eligible candidates as "name (id, vpc), ...".
+func describeEligible(candidates []ec2.Instance) string {
+	var parts []string
+	for _, c := range candidates {
+		if c.HasIAMProfile {
+			parts = append(parts, fmt.Sprintf("%s (%s, %s)", c.Name, c.ID, c.VPCID))
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 // ensureTunnel starts the SSM tunnel if not running
@@ -135,14 +149,8 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 	log.Printf("[%s] Starting SSM tunnel on port %d...", t.config.Description, t.tunnelPort)
 
 	// Determine which AWS profile/region to use for SSO check
-	profile := t.config.AWSProfile
-	if profile == "" {
-		profile = t.appConfig.AWS.Profile
-	}
-	region := t.config.AWSRegion
-	if region == "" {
-		region = t.appConfig.AWS.Region
-	}
+	profile := t.appConfig.ProfileFor(t.config)
+	region := t.appConfig.RegionFor(t.config)
 
 	// Check SSO authentication before proceeding
 	ctx := context.Background()
@@ -248,7 +256,7 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 		}
 
 		conn, err := net.DialTimeout("tcp",
-			fmt.Sprintf("%s:%d", t.appConfig.Network.ListenAddress, t.tunnelPort),
+			net.JoinHostPort(t.appConfig.Network.ListenAddress, strconv.Itoa(t.tunnelPort)),
 			t.appConfig.Timeouts.Connection)
 
 		if err == nil {
@@ -317,7 +325,7 @@ func (t *LazySSMTunnel) handleConnection(clientConn net.Conn) {
 
 	// Connect to the actual SSM tunnel
 	tunnelConn, err := net.Dial("tcp",
-		fmt.Sprintf("%s:%d", t.appConfig.Network.ListenAddress, t.tunnelPort))
+		net.JoinHostPort(t.appConfig.Network.ListenAddress, strconv.Itoa(t.tunnelPort)))
 	if err != nil {
 		log.Printf("[%s] Failed to connect to tunnel: %v", t.config.Description, err)
 		return
@@ -355,7 +363,7 @@ func (t *LazySSMTunnel) copyData(dst, src net.Conn, errCh chan<- error, directio
 // Start begins listening for connections
 func (t *LazySSMTunnel) Start(ctx context.Context) error {
 	listener, err := net.Listen("tcp",
-		fmt.Sprintf("%s:%d", t.appConfig.Network.ListenAddress, t.config.LocalPort))
+		net.JoinHostPort(t.appConfig.Network.ListenAddress, strconv.Itoa(t.config.LocalPort)))
 	if err != nil {
 		return fmt.Errorf("failed to listen on port %d: %w", t.config.LocalPort, err)
 	}

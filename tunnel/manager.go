@@ -11,13 +11,13 @@ import (
 
 // TunnelManager manages multiple tunnels
 type TunnelManager struct {
-	tunnels   []*LazySSMTunnel
-	wg        sync.WaitGroup
-	mu        sync.RWMutex
-	cfg       *config.Config
-	ctx       context.Context
-	cancel    context.CancelFunc
-	reloadCh  chan struct{}
+	tunnels  []*LazySSMTunnel
+	wg       sync.WaitGroup
+	mu       sync.RWMutex
+	cfg      *config.Config
+	ctx      context.Context
+	cancel   context.CancelFunc
+	reloadCh chan struct{}
 }
 
 // NewTunnelManager creates a new tunnel manager
