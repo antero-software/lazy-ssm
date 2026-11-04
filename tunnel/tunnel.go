@@ -417,7 +417,13 @@ func (t *LazySSMTunnel) Start(ctx context.Context) error {
 	log.Printf("[%s] Listening on port %d", t.config.Description, t.config.LocalPort)
 
 	// Start idle monitor
-	go t.monitorIdle(ctx)
+	// On cancel, monitorIdle shuts the tunnel down. Start waits for that, so
+	// the SSM process is stopped before the program can exit.
+	idleDone := make(chan struct{})
+	go func() {
+		t.monitorIdle(ctx)
+		close(idleDone)
+	}()
 
 	// Accept connections
 	go func() {
@@ -430,6 +436,7 @@ func (t *LazySSMTunnel) Start(ctx context.Context) error {
 		if err != nil {
 			select {
 			case <-ctx.Done():
+				<-idleDone
 				return ctx.Err()
 			default:
 				log.Printf("[%s] Accept error: %v", t.config.Description, err)

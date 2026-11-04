@@ -465,3 +465,43 @@ func TestCloseTunnel_StopsChildProcesses(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestStart_CancelStopsSSMProcessBeforeReturning(t *testing.T) {
+	free, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := free.Addr().(*net.TCPAddr).Port
+	free.Close()
+
+	cfg := &config.Config{
+		Network:  config.NetworkConfig{ListenAddress: "127.0.0.1", TunnelPortOffset: 10000},
+		Timeouts: config.TimeoutConfig{IdleCheck: time.Hour, Shutdown: 2 * time.Second, ShutdownPoll: 10 * time.Millisecond},
+	}
+	tun := NewLazySSMTunnel(config.TunnelConfig{Name: "staging-db", LocalPort: port}, cfg)
+	tun.problem = (&problemRecorder{}).record
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { tun.Start(ctx); close(done) }()
+
+	tun.mu.Lock()
+	err = tun.startProcess(exec.Command("sleep", "60"))
+	cmd := tun.tunnelCmd
+	tun.mu.Unlock()
+	if err != nil {
+		t.Fatalf("startProcess: %v", err)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not return after cancel")
+	}
+
+	if syscall.Kill(cmd.Process.Pid, 0) == nil {
+		cmd.Process.Kill()
+		t.Fatal("SSM process still running after Start returned")
+	}
+}
