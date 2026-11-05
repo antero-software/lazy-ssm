@@ -213,8 +213,11 @@ func (t *LazySSMTunnel) ensureTunnel(ctx context.Context) error {
 		// Check for early process exit before polling the port
 		select {
 		case <-ctx.Done():
-			// lazy-ssm is stopping; the exit watcher logs and cleans up.
+			// lazy-ssm is stopping: a normal stop. The watcher closes exitCh
+			// before it takes t.mu (held here), so waiting cannot deadlock.
+			t.stoppedCmd = cmd
 			killProcessGroup(cmd)
+			<-exitCh
 			t.tunnelCmd = nil
 			t.tunnelStartedAt.Store(0)
 			return ctx.Err()
@@ -292,6 +295,9 @@ func (t *LazySSMTunnel) startProcess(cmd *exec.Cmd) error {
 	// connection is reported where it fails (handleConnection).
 	go func() {
 		waitErr := cmd.Wait()
+		// If aws ended on its own, session-manager-plugin can still be
+		// running in the group (holding an SSM session open). Stop it.
+		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		pw.Close()
 		close(exitCh)
 

@@ -84,17 +84,18 @@ func (t *LazySSMTunnel) reportFailure(cause error, trigger failureTrigger) {
 		log.Printf("[%s] Diagnosed less than %v ago, not running again: %v", name, diagnosisCooldown, cause)
 		return
 	}
+	// Claim the run and reset strongCause under one lock, so a clear failure
+	// that arrives just after the claim is never erased.
+	t.diagMu.Lock()
 	if !t.diagnosing.CompareAndSwap(false, true) {
 		if trigger != triggerHeuristic {
 			// Remember a clear failure seen while a quiet one is being checked.
-			t.diagMu.Lock()
 			t.strongCause = cause
-			t.diagMu.Unlock()
 		}
+		t.diagMu.Unlock()
 		log.Printf("[%s] Diagnosis already running: %v", name, cause)
 		return
 	}
-	t.diagMu.Lock()
 	t.strongCause = nil
 	t.diagMu.Unlock()
 

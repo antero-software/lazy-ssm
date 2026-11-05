@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -553,7 +554,7 @@ func TestStart_CancelDuringLoginReturnsPromptly(t *testing.T) {
 	free.Close()
 
 	cfg := &config.Config{
-		Network:  config.NetworkConfig{ListenAddress: "127.0.0.1", TunnelPortOffset: 10000},
+		Network:  config.NetworkConfig{ListenAddress: "127.0.0.1", TunnelPortOffset: 1}, // a random high port + 10000 can pass 65535
 		Timeouts: config.TimeoutConfig{IdleCheck: time.Hour, Shutdown: 2 * time.Second, ShutdownPoll: 10 * time.Millisecond},
 	}
 	tun := NewLazySSMTunnel(config.TunnelConfig{Name: "staging-db", LocalPort: port, InstanceID: "i-1"}, cfg)
@@ -572,14 +573,24 @@ func TestStart_CancelDuringLoginReturnsPromptly(t *testing.T) {
 
 	var conn net.Conn
 	for i := 0; i < 100 && conn == nil; i++ {
-		conn, _ = net.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)))
 		time.Sleep(10 * time.Millisecond)
+		conn, _ = net.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)))
+		// Dialling a local port before anything listens on it can connect
+		// the socket to itself. That is not the tunnel; try again.
+		if conn != nil && conn.LocalAddr().String() == conn.RemoteAddr().String() {
+			conn.Close()
+			conn = nil
+		}
 	}
 	if conn == nil {
 		t.Fatal("could not connect to the tunnel")
 	}
 	defer conn.Close()
-	<-entered
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the connection never reached the login step")
+	}
 
 	cancel()
 	select {
@@ -590,5 +601,134 @@ func TestStart_CancelDuringLoginReturnsPromptly(t *testing.T) {
 	tun.diagWG.Wait()
 	if rec.count() != 0 {
 		t.Errorf("problems = %q, want none on shutdown", rec.calls)
+	}
+}
+
+// syncBuffer is a log writer that is safe to read while goroutines log.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+func readPID(t *testing.T, pidFile string) int {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if b, err := os.ReadFile(pidFile); err == nil {
+			var pid int
+			if _, err := fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &pid); err == nil && pid > 0 {
+				return pid
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("child never started")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestUnexpectedExit_StopsLeftoverChildren(t *testing.T) {
+	tun := testTunnel(&problemRecorder{})
+	pidFile := t.TempDir() + "/child.pid"
+
+	// Like aws dying while session-manager-plugin keeps running.
+	tun.mu.Lock()
+	err := tun.startProcess(exec.Command("sh", "-c", "sleep 60 & echo $! > "+pidFile+"; exit 0"))
+	tun.mu.Unlock()
+	if err != nil {
+		t.Fatalf("startProcess: %v", err)
+	}
+	child := readPID(t, pidFile)
+
+	deadline := time.Now().Add(6 * time.Second)
+	for syscall.Kill(child, 0) == nil {
+		if time.Now().After(deadline) {
+			syscall.Kill(child, syscall.SIGKILL)
+			t.Fatalf("child %d still running after its parent exited", child)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestEnsureTunnel_CancelDuringStartupIsANormalStop(t *testing.T) {
+	dir := t.TempDir()
+	fakeAWS, pidFile := dir+"/aws", dir+"/aws.pid"
+	if err := os.WriteFile(fakeAWS, []byte("#!/bin/sh\necho $$ > "+pidFile+"\nexec sleep 60\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		AWS:      config.AWSConfig{CLIPath: fakeAWS},
+		Network:  config.NetworkConfig{ListenAddress: "127.0.0.1", TunnelPortOffset: 10000},
+		Timeouts: config.TimeoutConfig{TunnelReady: 30 * time.Second, TunnelReadyPoll: 10 * time.Millisecond, Connection: 10 * time.Millisecond},
+	}
+	tun := NewLazySSMTunnel(config.TunnelConfig{Name: "x", Description: "X", LocalPort: 31999, InstanceID: "i-1"}, cfg)
+	tun.problem = (&problemRecorder{}).record
+	tun.checkLogin = func(context.Context, string, string, string) error { return nil }
+
+	logs := &syncBuffer{}
+	prev := log.Writer()
+	log.SetOutput(logs)
+	defer log.SetOutput(prev)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- tun.ensureTunnel(ctx) }()
+
+	pid := readPID(t, pidFile)
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ensureTunnel did not return after cancel")
+	}
+	if syscall.Kill(pid, 0) == nil {
+		t.Errorf("SSM process %d not stopped and reaped when ensureTunnel returned", pid)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(logs.String(), "SSM tunnel stopped") && !strings.Contains(logs.String(), "ERROR: SSM tunnel process exited") {
+		if time.Now().After(deadline) {
+			t.Fatal("exit watcher never logged")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if strings.Contains(logs.String(), "ERROR: SSM tunnel process exited") {
+		t.Error("a stop during shutdown was logged as an error")
+	}
+}
+
+func TestReportFailure_StrongCauseNeverLostWhenTriggersRace(t *testing.T) {
+	for i := 0; i < 300; i++ {
+		rec := &problemRecorder{}
+		diag := &fakeDiagnosis{release: make(chan struct{}), started: make(chan struct{}, 1)}
+		tun := diagTunnel(rec, diag)
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); <-start; tun.reportFailure(errNoResponse, triggerHeuristic) }()
+		go func() { defer wg.Done(); <-start; tun.reportFailure(errDestination, triggerPlugin) }()
+		close(start)
+		wg.Wait()
+		<-diag.started
+		close(diag.release)
+		tun.diagWG.Wait()
+
+		if rec.count() != 1 {
+			t.Fatalf("iteration %d: problems = %d, want 1 (the plugin failure must always pop up)", i, rec.count())
+		}
 	}
 }
