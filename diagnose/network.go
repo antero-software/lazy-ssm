@@ -68,10 +68,17 @@ func runJSON(ctx context.Context, aws awscli.Runner, v any, args ...string) erro
 // endpoint. found is false when it is not an RDS endpoint in this account
 // and region.
 func findDatabase(ctx context.Context, aws awscli.Runner, endpoint string) (dbTarget, bool, error) {
+	// The instance and cluster lookups are separate permissions. If the
+	// instance lookup is denied, still try the clusters (Aurora endpoints);
+	// only the cluster's VPC (which comes from its instances) is then unknown.
 	var instances []rdsInstance
-	if err := runJSON(ctx, aws, &instances, "rds", "describe-db-instances", "--output", "json",
-		"--query", "DBInstances[].{ID:DBInstanceIdentifier,Addr:Endpoint.Address,Status:DBInstanceStatus,VPC:DBSubnetGroup.VpcId,SGs:VpcSecurityGroups[].VpcSecurityGroupId,Cluster:DBClusterIdentifier}"); err != nil {
-		return dbTarget{}, false, err
+	instErr := runJSON(ctx, aws, &instances, "rds", "describe-db-instances", "--output", "json",
+		"--query", "DBInstances[].{ID:DBInstanceIdentifier,Addr:Endpoint.Address,Status:DBInstanceStatus,VPC:DBSubnetGroup.VpcId,SGs:VpcSecurityGroups[].VpcSecurityGroupId,Cluster:DBClusterIdentifier}")
+	firstErr := func(err error) error {
+		if instErr != nil {
+			return instErr
+		}
+		return err
 	}
 	for _, in := range instances {
 		if sameHost(endpoint, in.Addr) {
@@ -82,7 +89,7 @@ func findDatabase(ctx context.Context, aws awscli.Runner, endpoint string) (dbTa
 	var clusters []rdsCluster
 	if err := runJSON(ctx, aws, &clusters, "rds", "describe-db-clusters", "--output", "json",
 		"--query", "DBClusters[].{ID:DBClusterIdentifier,Writer:Endpoint,Reader:ReaderEndpoint,Status:Status,SGs:VpcSecurityGroups[].VpcSecurityGroupId}"); err != nil {
-		return dbTarget{}, false, err
+		return dbTarget{}, false, firstErr(err)
 	}
 	clusterTarget := func(c rdsCluster) dbTarget {
 		t := dbTarget{ID: c.ID, Status: c.Status, SecurityGroupIDs: c.SGs}
@@ -103,7 +110,7 @@ func findDatabase(ctx context.Context, aws awscli.Runner, endpoint string) (dbTa
 	var custom []rdsClusterEndpoint
 	if err := runJSON(ctx, aws, &custom, "rds", "describe-db-cluster-endpoints", "--output", "json",
 		"--query", "DBClusterEndpoints[].{Cluster:DBClusterIdentifier,Addr:Endpoint}"); err != nil {
-		return dbTarget{}, false, err
+		return dbTarget{}, false, firstErr(err)
 	}
 	for _, e := range custom {
 		if !sameHost(endpoint, e.Addr) {
@@ -115,7 +122,9 @@ func findDatabase(ctx context.Context, aws awscli.Runner, endpoint string) (dbTa
 			}
 		}
 	}
-	return dbTarget{}, false, nil
+	// Not a cluster. If the instance lookup was denied, it may still be an
+	// RDS instance we could not see.
+	return dbTarget{}, false, instErr
 }
 
 // sgRule is one inbound security group rule.
@@ -365,7 +374,7 @@ func addressResult(ctx context.Context, tc config.TunnelConfig, d Deps, inst ec2
 
 	var cidrs []string
 	if err := runJSON(ctx, d.AWS, &cidrs, "ec2", "describe-vpcs", "--vpc-ids", inst.VPCID, "--output", "json",
-		"--query", "Vpcs[0].CidrBlockAssociationSet[].CidrBlock"); err != nil {
+		"--query", "Vpcs[0].[CidrBlockAssociationSet[].CidrBlock, Ipv6CidrBlockAssociationSet[].Ipv6CidrBlock][]"); err != nil {
 		return awsFailure(checkAddress, err, "ec2", "describe-vpcs")
 	}
 	if ipInCIDRs(ip, cidrs) {

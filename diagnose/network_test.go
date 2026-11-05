@@ -3,6 +3,7 @@ package diagnose
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -388,5 +389,57 @@ func TestRun_PrefixListRuleIsCouldNotCheck(t *testing.T) {
 	}
 	if r.HasFail() {
 		t.Errorf("HasFail = true; a prefix-list rule must not become a firewall failure: %+v", r.Results)
+	}
+}
+
+func TestRun_InstancesDeniedStillChecksAuroraCluster(t *testing.T) {
+	aws := networkAWS(stgBastion, rulesAllowBastion).fail("rds describe-db-instances", accessDenied("rds", "describe-db-instances"))
+
+	r := Run(context.Background(), stagingTunnel(), deps(aws))
+
+	if db, _ := resultFor(r, "Database"); db.Status != Pass {
+		t.Errorf("Database = %+v, want the cluster found through describe-db-clusters", db)
+	}
+	if run, _ := resultFor(r, "Database running"); run.Status != Pass {
+		t.Errorf("Database running = %+v, want Pass", run)
+	}
+	if fw, _ := resultFor(r, "Firewall"); fw.Status != Pass {
+		t.Errorf("Firewall = %+v, want Pass from the cluster security groups", fw)
+	}
+	if vpc, _ := resultFor(r, "Same VPC"); vpc.Status != CouldNotCheck {
+		t.Errorf("Same VPC = %+v, want CouldNotCheck (the VPC comes from the denied instance call)", vpc)
+	}
+}
+
+func TestRun_InstancesDeniedAndNotACluster_ReportsTheDenial(t *testing.T) {
+	aws := networkAWS(stgBastion, rulesAllowBastion).fail("rds describe-db-instances", accessDenied("rds", "describe-db-instances"))
+	tc := stagingTunnel()
+	tc.RDSEndpoint = "stg-1.abc.ap-southeast-2.rds.amazonaws.com" // an instance endpoint
+
+	r := Run(context.Background(), tc, deps(aws))
+
+	if db, _ := resultFor(r, "Database"); db.Status != CouldNotCheck || db.Message != "Your AWS role is not allowed to run rds describe-db-instances." {
+		t.Errorf("Database = %+v", db)
+	}
+}
+
+func TestRun_IPv6TargetUsesIPv6Ranges(t *testing.T) {
+	aws := networkAWS(prodBastion, rulesAllowBastion).on("ec2 describe-vpcs", `["10.0.0.0/16", "2406:da1c:abc::/56"]`)
+	tc := stagingTunnel()
+	tc.RDSEndpoint = "2406:da1c:abc::5"
+
+	r := Run(context.Background(), tc, deps(aws))
+
+	if addr, _ := resultFor(r, "Address in instance VPC"); addr.Status != Pass {
+		t.Errorf("Address = %+v, want Pass", addr)
+	}
+	found := false
+	for _, call := range aws.calls {
+		if strings.Contains(call, "ec2 describe-vpcs") && strings.Contains(call, "Ipv6CidrBlockAssociationSet") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("describe-vpcs query does not ask for IPv6 ranges: %q", aws.calls)
 	}
 }
