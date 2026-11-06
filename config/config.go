@@ -131,3 +131,19 @@ func setDefaults() {
 	// Empty tunnels array by default
 	viper.SetDefault("tunnels", []TunnelConfig{})
 }
+
+// ProfileFor returns the AWS profile a tunnel uses: its own, else the global one.
+func (c *Config) ProfileFor(t TunnelConfig) string {
+	if t.AWSProfile != "" {
+		return t.AWSProfile
+	}
+	return c.AWS.Profile
+}
+
+// RegionFor returns the AWS region a tunnel uses: its own, else the global one.
+func (c *Config) RegionFor(t TunnelConfig) string {
+	if t.AWSRegion != "" {
+		return t.AWSRegion
+	}
+	return c.AWS.Region
+}

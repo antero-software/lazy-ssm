@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/antero-software/lazy-ssm/config"
+	"github.com/antero-software/lazy-ssm/diagnose"
 	"github.com/antero-software/lazy-ssm/ec2"
 	"github.com/antero-software/lazy-ssm/notify"
 	"github.com/antero-software/lazy-ssm/sso"
@@ -33,15 +35,41 @@ type LazySSMTunnel struct {
 	mu              sync.Mutex
 	lastActivity    atomic.Int64
 	connections     atomic.Int32
-	tunnelStartedAt atomic.Int64 // Unix seconds when the current SSM process started (0 if not running)
-	resolvedInstID  string       // Cached resolved instance ID from pattern
+	tunnelStartedAt atomic.Int64  // Unix seconds when the current SSM process started (0 if not running)
+	resolvedInstID  string        // Cached resolved instance ID from pattern
+	tunnelExit      chan struct{} // Closed when tunnelCmd exits (guarded by mu)
+	stoppedCmd      *exec.Cmd     // Process that closeTunnel is stopping on purpose (guarded by mu)
+
+	// problem shows a pop-up the user must act on (notify.Problem in production).
+	problem func(tunnel, title, message string)
+	// listenRetry is how long to wait before trying a busy local port again.
+	listenRetry time.Duration
+	// checkLogin checks the AWS login and asks to log in (sso.CheckProfile in production).
+	checkLogin func(ctx context.Context, cliPath, profile, region string) error
+
+	// runDiagnosis runs the AWS checks (defaultDiagnosis in production).
+	runDiagnosis  func(ctx context.Context) diagnose.Report
+	diagnosing    atomic.Bool
+	stopping      atomic.Bool  // set by shutdown: no new diagnoses
+	lastDiagnosis atomic.Int64 // Unix nanoseconds when the last diagnosis finished
+	diagWG        sync.WaitGroup
+	diagMu        sync.Mutex
+	strongCause   error // a clear failure seen while a quiet one was being checked (guarded by diagMu)
 }
+
+// listenRetryInterval is how often a tunnel tries again to open a local
+// port that another program is using.
+const listenRetryInterval = 30 * time.Second
+
+// processWaitDelay bounds how long Wait waits for output pipes after the SSM
+// process exits (a child such as session-manager-plugin can keep them open).
+const processWaitDelay = 2 * time.Second
 
 // findFreePort attempts to find a free port starting from the specified port
 func findFreePort(listenAddr string, startPort int) (int, error) {
 	for i := 0; i < maxPortAttempts; i++ {
 		port := startPort + i
-		addr := fmt.Sprintf("%s:%d", listenAddr, port)
+		addr := net.JoinHostPort(listenAddr, strconv.Itoa(port))
 
 		// Try to listen on the port
 		listener, err := net.Listen("tcp", addr)
@@ -57,11 +85,16 @@ func findFreePort(listenAddr string, startPort int) (int, error) {
 
 // NewLazySSMTunnel creates a new tunnel manager
 func NewLazySSMTunnel(tunnelConfig config.TunnelConfig, appConfig *config.Config) *LazySSMTunnel {
-	return &LazySSMTunnel{
-		config:     tunnelConfig,
-		appConfig:  appConfig,
-		tunnelPort: tunnelConfig.LocalPort + appConfig.Network.TunnelPortOffset,
+	t := &LazySSMTunnel{
+		config:      tunnelConfig,
+		appConfig:   appConfig,
+		problem:     notify.Problem,
+		checkLogin:  sso.CheckProfile,
+		listenRetry: listenRetryInterval,
+		tunnelPort:  tunnelConfig.LocalPort + appConfig.Network.TunnelPortOffset,
 	}
+	t.runDiagnosis = t.defaultDiagnosis
+	return t
 }
 
 // resolveInstanceID resolves the instance ID from either explicit ID or pattern
@@ -81,23 +114,25 @@ func (t *LazySSMTunnel) resolveInstanceID(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("neither instance_id nor instance_pattern specified")
 	}
 
-	// Determine which AWS profile/region to use
-	profile := t.config.AWSProfile
-	if profile == "" {
-		profile = t.appConfig.AWS.Profile
-	}
-	region := t.config.AWSRegion
-	if region == "" {
-		region = t.appConfig.AWS.Region
-	}
+	profile := t.appConfig.ProfileFor(t.config)
+	region := t.appConfig.RegionFor(t.config)
 
 	log.Printf("[%s] Discovering instance matching pattern: %s", t.config.Description, t.config.InstancePattern)
 
 	discovery := ec2.NewInstanceDiscovery(t.appConfig.AWS.CLIPath, profile, region)
-	instanceID, err := discovery.FindInstanceWithSSM(ctx, t.config.InstancePattern)
+	candidates, err := discovery.ListCandidates(ctx, t.config.InstancePattern)
 	if err != nil {
 		return "", fmt.Errorf("failed to discover instance: %w", err)
 	}
+	chosen, eligible, ok := ec2.PickSSMCandidate(candidates)
+	if !ok {
+		return "", fmt.Errorf("failed to discover instance: no running SSM-managed instance found matching pattern: %s", t.config.InstancePattern)
+	}
+	if eligible > 1 && ec2.SpansVPCs(candidates) {
+		log.Printf("[%s] WARNING: %d instances in different VPCs match '%s': %s. Using %s (%s).",
+			t.config.Description, eligible, t.config.InstancePattern, ec2.FormatEligible(candidates), chosen.Name, chosen.ID)
+	}
+	instanceID := chosen.ID
 
 	log.Printf("[%s] Discovered instance: %s", t.config.Description, instanceID)
 
@@ -107,7 +142,7 @@ func (t *LazySSMTunnel) resolveInstanceID(ctx context.Context) (string, error) {
 }
 
 // ensureTunnel starts the SSM tunnel if not running
-func (t *LazySSMTunnel) ensureTunnel() error {
+func (t *LazySSMTunnel) ensureTunnel(ctx context.Context) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -135,18 +170,11 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 	log.Printf("[%s] Starting SSM tunnel on port %d...", t.config.Description, t.tunnelPort)
 
 	// Determine which AWS profile/region to use for SSO check
-	profile := t.config.AWSProfile
-	if profile == "" {
-		profile = t.appConfig.AWS.Profile
-	}
-	region := t.config.AWSRegion
-	if region == "" {
-		region = t.appConfig.AWS.Region
-	}
+	profile := t.appConfig.ProfileFor(t.config)
+	region := t.appConfig.RegionFor(t.config)
 
 	// Check SSO authentication before proceeding
-	ctx := context.Background()
-	if err := sso.CheckProfile(ctx, t.appConfig.AWS.CLIPath, profile, region); err != nil {
+	if err := t.checkLogin(ctx, t.appConfig.AWS.CLIPath, profile, region); err != nil {
 		return fmt.Errorf("SSO authentication failed: %w", err)
 	}
 
@@ -175,59 +203,11 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 	}
 
 	// Start new SSM session
-	t.tunnelCmd = exec.Command(t.appConfig.AWS.CLIPath, args...)
-	t.tunnelCmd.Stdout = log.Writer()
-
-	// Pipe stderr separately so we can scan it for error messages
-	stderrPipe, pipeErr := t.tunnelCmd.StderrPipe()
-	if pipeErr != nil {
-		return fmt.Errorf("failed to create stderr pipe: %w", pipeErr)
-	}
-
-	if err := t.tunnelCmd.Start(); err != nil {
-		stderrPipe.Close()
+	if err := t.startProcess(exec.Command(t.appConfig.AWS.CLIPath, args...)); err != nil {
 		return fmt.Errorf("failed to start SSM tunnel: %w", err)
 	}
-
-	// Record when this SSM process started; the keepalive window is measured
-	// from here (i.e. from the first connection that started the session).
-	t.tunnelStartedAt.Store(time.Now().Unix())
-
-	// Capture the command reference before launching goroutines
 	cmd := t.tunnelCmd
-
-	// exitCh is closed when the process exits, allowing the readiness loop to detect early death
-	exitCh := make(chan struct{})
-
-	// Scan stderr for errors in the background
-	go t.scanTunnelOutput(stderrPipe)
-
-	// Monitor the process for exit; cleans up state and logs helpful diagnostics
-	go func() {
-		waitErr := cmd.Wait()
-		close(exitCh)
-
-		t.mu.Lock()
-		if t.tunnelCmd == cmd {
-			t.tunnelCmd = nil
-			t.tunnelStartedAt.Store(0)
-			t.resolvedInstID = "" // Re-discover instance on next attempt
-		}
-		t.mu.Unlock()
-
-		if waitErr != nil {
-			log.Printf("[%s] ERROR: SSM tunnel process exited: %v", t.config.Description, waitErr)
-			notify.Error(
-				fmt.Sprintf("Tunnel error: %s", t.config.Description),
-				fmt.Sprintf("SSM tunnel process exited: %v — verify instance matching '%s' can reach %s:%d",
-					waitErr, t.config.InstancePattern, t.config.RDSEndpoint, t.config.RDSPort),
-			)
-		} else {
-			log.Printf("[%s] SSM tunnel process exited", t.config.Description)
-		}
-		log.Printf("[%s] Hint: verify instance matching '%s' can reach %s:%d",
-			t.config.Description, t.config.InstancePattern, t.config.RDSEndpoint, t.config.RDSPort)
-	}()
+	exitCh := t.tunnelExit
 
 	// Wait for tunnel to be ready by checking port availability
 	readyTimeout := t.appConfig.Timeouts.TunnelReady
@@ -239,6 +219,15 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 	for time.Since(startTime) < readyTimeout {
 		// Check for early process exit before polling the port
 		select {
+		case <-ctx.Done():
+			// lazy-ssm is stopping: a normal stop. The watcher closes exitCh
+			// before it takes t.mu (held here), so waiting cannot deadlock.
+			t.stoppedCmd = cmd
+			killProcessGroup(cmd)
+			<-exitCh
+			t.tunnelCmd = nil
+			t.tunnelStartedAt.Store(0)
+			return ctx.Err()
 		case <-exitCh:
 			t.tunnelCmd = nil
 			t.tunnelStartedAt.Store(0)
@@ -248,7 +237,7 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 		}
 
 		conn, err := net.DialTimeout("tcp",
-			fmt.Sprintf("%s:%d", t.appConfig.Network.ListenAddress, t.tunnelPort),
+			net.JoinHostPort(t.appConfig.Network.ListenAddress, strconv.Itoa(t.tunnelPort)),
 			t.appConfig.Timeouts.Connection)
 
 		if err == nil {
@@ -264,7 +253,7 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 	}
 
 	// Timeout - kill the hung process; the exit goroutine will log and clean up
-	cmd.Process.Kill()
+	killProcessGroup(cmd)
 	t.tunnelCmd = nil
 	t.tunnelStartedAt.Store(0)
 
@@ -272,7 +261,87 @@ func (t *LazySSMTunnel) ensureTunnel() error {
 		readyTimeout, t.config.InstancePattern, t.config.RDSEndpoint, t.config.RDSPort)
 }
 
-// scanTunnelOutput reads from the SSM process stderr, logging each line and highlighting
+// displayName is the tunnel's description, or its name when it has none.
+func (t *LazySSMTunnel) displayName() string {
+	if t.config.Description != "" {
+		return t.config.Description
+	}
+	return t.config.Name
+}
+
+// startProcess starts the SSM process, records its start time, and watches
+// its output and exit. The caller holds t.mu.
+func (t *LazySSMTunnel) startProcess(cmd *exec.Cmd) error {
+	// Both output streams go through one pipe so every line is logged with
+	// the tunnel name. exec copies into it, so Wait finishes the copy before
+	// the watcher closes the pipe.
+	pr, pw := io.Pipe()
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+	cmd.WaitDelay = processWaitDelay
+	// Own process group, so stopping the tunnel also stops the
+	// session-manager-plugin that aws starts (and its SSM session).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	if err := cmd.Start(); err != nil {
+		pw.Close()
+		pr.Close()
+		return err
+	}
+
+	// Record when this SSM process started; the keepalive window is measured
+	// from here (i.e. from the first connection that started the session).
+	t.tunnelStartedAt.Store(time.Now().Unix())
+	t.tunnelCmd = cmd
+	exitCh := make(chan struct{})
+	t.tunnelExit = exitCh
+
+	go t.scanTunnelOutput(pr)
+
+	// Watch for exit; clean up state and log. Never pops up: a failed
+	// connection is reported where it fails (handleConnection).
+	go func() {
+		waitErr := cmd.Wait()
+		// If aws ended on its own, session-manager-plugin can still be
+		// running in the group (holding an SSM session open). Stop it.
+		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		pw.Close()
+		close(exitCh)
+
+		t.mu.Lock()
+		intentional := t.stoppedCmd == cmd
+		if intentional {
+			t.stoppedCmd = nil
+		}
+		if t.tunnelCmd == cmd {
+			t.tunnelCmd = nil
+			t.tunnelStartedAt.Store(0)
+			t.resolvedInstID = "" // Re-discover instance on next attempt
+		}
+		t.mu.Unlock()
+
+		switch {
+		case intentional:
+			log.Printf("[%s] SSM tunnel stopped", t.config.Description)
+		case waitErr != nil:
+			log.Printf("[%s] ERROR: SSM tunnel process exited: %v", t.config.Description, waitErr)
+			log.Printf("[%s] Hint: verify instance matching '%s' can reach %s:%d",
+				t.config.Description, t.config.InstancePattern, t.config.RDSEndpoint, t.config.RDSPort)
+		default:
+			log.Printf("[%s] SSM tunnel process exited", t.config.Description)
+		}
+	}()
+	return nil
+}
+
+// killProcessGroup kills the SSM process and every child it started.
+func killProcessGroup(cmd *exec.Cmd) {
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		cmd.Process.Kill()
+	}
+}
+
+// scanTunnelOutput reads the SSM process output, logging each line and highlighting
 // lines that contain error patterns so they're easy to spot in logs.
 func (t *LazySSMTunnel) scanTunnelOutput(r io.Reader) {
 	scanner := bufio.NewScanner(r)
@@ -285,18 +354,23 @@ func (t *LazySSMTunnel) scanTunnelOutput(r io.Reader) {
 		if strings.Contains(lower, "error") || strings.Contains(lower, "failed") ||
 			strings.Contains(lower, "unable") || strings.Contains(lower, "cannot") {
 			log.Printf("[%s] SSM ERROR: %s", t.config.Description, line)
-			notify.Error(
-				fmt.Sprintf("Tunnel error: %s", t.config.Description),
-				line,
-			)
+			if isDestinationFailure(line) {
+				t.reportFailure(errDestination, triggerPlugin)
+			}
 		} else {
 			log.Printf("[%s] SSM: %s", t.config.Description, line)
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("[%s] SSM output not logged: %v", t.config.Description, err)
+	}
+	// Keep reading so the SSM process can never block on a full pipe (and
+	// Wait, and so closeTunnel, can never hang).
+	io.Copy(io.Discard, r)
 }
 
 // handleConnection handles a client connection
-func (t *LazySSMTunnel) handleConnection(clientConn net.Conn) {
+func (t *LazySSMTunnel) handleConnection(ctx context.Context, clientConn net.Conn) {
 	defer clientConn.Close()
 
 	t.connections.Add(1)
@@ -306,18 +380,15 @@ func (t *LazySSMTunnel) handleConnection(clientConn net.Conn) {
 	log.Printf("[%s] New connection from %s", t.config.Description, clientAddr)
 
 	// Ensure tunnel is running
-	if err := t.ensureTunnel(); err != nil {
+	if err := t.ensureTunnel(ctx); err != nil {
 		log.Printf("[%s] Failed to ensure tunnel: %v", t.config.Description, err)
-		notify.Error(
-			fmt.Sprintf("Tunnel failed: %s", t.config.Description),
-			err.Error(),
-		)
+		t.reportFailure(err, triggerStart)
 		return
 	}
 
 	// Connect to the actual SSM tunnel
 	tunnelConn, err := net.Dial("tcp",
-		fmt.Sprintf("%s:%d", t.appConfig.Network.ListenAddress, t.tunnelPort))
+		net.JoinHostPort(t.appConfig.Network.ListenAddress, strconv.Itoa(t.tunnelPort)))
 	if err != nil {
 		log.Printf("[%s] Failed to connect to tunnel: %v", t.config.Description, err)
 		return
@@ -329,10 +400,12 @@ func (t *LazySSMTunnel) handleConnection(clientConn net.Conn) {
 
 	// Create error channel for goroutines
 	errCh := make(chan error, 2)
+	started := time.Now()
+	var fromDB, fromClient atomic.Int64
 
 	// Proxy data bidirectionally
-	go t.copyData(tunnelConn, clientConn, errCh, "client->RDS")
-	go t.copyData(clientConn, tunnelConn, errCh, "RDS->client")
+	go t.copyData(tunnelConn, clientConn, errCh, &fromClient)
+	go t.copyData(clientConn, tunnelConn, errCh, &fromDB)
 
 	// Wait for either direction to close
 	err = <-errCh
@@ -341,11 +414,19 @@ func (t *LazySSMTunnel) handleConnection(clientConn net.Conn) {
 	}
 
 	log.Printf("[%s] Connection from %s closed", t.config.Description, clientAddr)
+	if noResponse(fromDB.Load(), fromClient.Load(), time.Since(started)) {
+		t.reportFailure(errNoResponse, triggerHeuristic)
+	}
 }
 
-// copyData copies data between connections
-func (t *LazySSMTunnel) copyData(dst, src net.Conn, errCh chan<- error, direction string) {
-	_, err := io.Copy(dst, src)
+// copyData copies data between connections. When counter is set, it adds
+// the bytes read from src.
+func (t *LazySSMTunnel) copyData(dst, src net.Conn, errCh chan<- error, counter *atomic.Int64) {
+	var r io.Reader = src
+	if counter != nil {
+		r = countingReader{r: src, n: counter}
+	}
+	_, err := io.Copy(dst, r)
 	errCh <- err
 
 	// Update activity on each data transfer
@@ -354,17 +435,22 @@ func (t *LazySSMTunnel) copyData(dst, src net.Conn, errCh chan<- error, directio
 
 // Start begins listening for connections
 func (t *LazySSMTunnel) Start(ctx context.Context) error {
-	listener, err := net.Listen("tcp",
-		fmt.Sprintf("%s:%d", t.appConfig.Network.ListenAddress, t.config.LocalPort))
+	listener, err := t.listen(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to listen on port %d: %w", t.config.LocalPort, err)
+		return err
 	}
 	defer listener.Close()
 
 	log.Printf("[%s] Listening on port %d", t.config.Description, t.config.LocalPort)
 
 	// Start idle monitor
-	go t.monitorIdle(ctx)
+	// On cancel, monitorIdle shuts the tunnel down. Start waits for that, so
+	// the SSM process is stopped before the program can exit.
+	idleDone := make(chan struct{})
+	go func() {
+		t.monitorIdle(ctx)
+		close(idleDone)
+	}()
 
 	// Accept connections
 	go func() {
@@ -377,6 +463,7 @@ func (t *LazySSMTunnel) Start(ctx context.Context) error {
 		if err != nil {
 			select {
 			case <-ctx.Done():
+				<-idleDone
 				return ctx.Err()
 			default:
 				log.Printf("[%s] Accept error: %v", t.config.Description, err)
@@ -384,8 +471,42 @@ func (t *LazySSMTunnel) Start(ctx context.Context) error {
 			}
 		}
 
-		go t.handleConnection(conn)
+		go t.handleConnection(ctx, conn)
 	}
+}
+
+// listen opens the tunnel's local port. If another program is using it, it
+// shows one pop-up and tries again every listenRetry until the port is free
+// or ctx is cancelled. The service keeps running, so the service manager
+// does not restart it in a loop.
+func (t *LazySSMTunnel) listen(ctx context.Context) (net.Listener, error) {
+	addr := net.JoinHostPort(t.appConfig.Network.ListenAddress, strconv.Itoa(t.config.LocalPort))
+	reported := false
+	for {
+		listener, err := net.Listen("tcp", addr)
+		if err == nil {
+			if reported {
+				log.Printf("[%s] Port %d is free now", t.config.Description, t.config.LocalPort)
+			}
+			return listener, nil
+		}
+		log.Printf("[%s] Cannot listen on port %d: %v. Trying again in %v.", t.config.Description, t.config.LocalPort, err, t.listenRetry)
+		if !reported {
+			t.listenProblem(err)
+			reported = true
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(t.listenRetry):
+		}
+	}
+}
+
+// listenProblem shows a pop-up when a tunnel cannot listen on its local port.
+func (t *LazySSMTunnel) listenProblem(err error) {
+	t.problem(t.config.Name, fmt.Sprintf("%s: cannot connect", t.displayName()),
+		fmt.Sprintf("lazy-ssm cannot listen on local port %d. Another program may be using it. lazy-ssm will keep trying every 30 seconds.\n\n%v", t.config.LocalPort, err))
 }
 
 // shouldCloseIdle reports whether an idle tunnel should be reaped now.
@@ -432,23 +553,30 @@ func (t *LazySSMTunnel) monitorIdle(ctx context.Context) {
 	}
 }
 
-// closeTunnel terminates the SSM tunnel
+// closeTunnel terminates the SSM tunnel on purpose (idle, reload, shutdown).
+// The exit watcher sees the mark and logs it as a normal stop.
 func (t *LazySSMTunnel) closeTunnel() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	if t.tunnelCmd != nil && t.tunnelCmd.Process != nil {
-		log.Printf("[%s] Terminating SSM tunnel", t.config.Description)
-		t.tunnelCmd.Process.Kill()
-		t.tunnelCmd.Wait()
-		t.tunnelCmd = nil
-		t.tunnelStartedAt.Store(0)
+	cmd, exit := t.tunnelCmd, t.tunnelExit
+	if cmd == nil || cmd.Process == nil {
+		return
 	}
+	log.Printf("[%s] Terminating SSM tunnel", t.config.Description)
+	t.stoppedCmd = cmd
+	killProcessGroup(cmd)
+	// The watcher closes exit before it takes t.mu, so waiting here while
+	// holding the lock cannot deadlock.
+	<-exit
+	t.tunnelCmd = nil
+	t.tunnelStartedAt.Store(0)
 }
 
 // shutdown gracefully shuts down the tunnel
 func (t *LazySSMTunnel) shutdown() {
 	log.Printf("[%s] Shutting down", t.config.Description)
+	t.stopping.Store(true)
 
 	// Wait for active connections to finish (with timeout)
 	timeout := time.After(t.appConfig.Timeouts.Shutdown)

@@ -14,16 +14,26 @@ import (
 	"github.com/antero-software/lazy-ssm/notify"
 )
 
+// loginTimeout cuts off "aws sso login" if the user never finishes in the browser.
+const loginTimeout = 5 * time.Minute
+
 // AuthChecker handles AWS SSO authentication checks
 type AuthChecker struct {
 	cliPath string
+	ask     func(ctx context.Context, profile string) notify.LoginChoice
+	login   func(ctx context.Context, profile string) error
+	gate    *loginGate
 }
 
 // NewAuthChecker creates a new SSO auth checker
 func NewAuthChecker(cliPath string) *AuthChecker {
-	return &AuthChecker{
+	a := &AuthChecker{
 		cliPath: cliPath,
+		ask:     notify.AskLogin,
+		gate:    sharedGate,
 	}
+	a.login = a.initiateLogin
+	return a
 }
 
 // CheckAndLogin checks if the AWS profile is authenticated and initiates SSO login if needed
@@ -49,10 +59,9 @@ func (a *AuthChecker) CheckAndLogin(ctx context.Context, profile, region string)
 		return fmt.Errorf("profile '%s' requires authentication but is not configured for SSO", profile)
 	}
 
-	// Initiate SSO login
-	log.Printf("[SSO] Profile '%s' requires authentication. Opening SSO login page...", profile)
-	notify.SSO(profile, ssoURL)
-	if err := a.initiateLogin(ctx, profile); err != nil {
+	// Ask the user, then initiate SSO login
+	log.Printf("[SSO] Profile '%s' requires authentication (start URL: %s). Asking before opening the SSO login page...", profile, ssoURL)
+	if err := a.promptAndLogin(ctx, profile); err != nil {
 		return fmt.Errorf("SSO login failed: %w", err)
 	}
 
@@ -178,8 +187,26 @@ func ssoSessionURL(sessionName string) string {
 	return ""
 }
 
+// promptAndLogin asks the user whether to log in, then runs the login.
+// Tunnels that share a profile share one prompt and one login.
+func (a *AuthChecker) promptAndLogin(ctx context.Context, profile string) error {
+	return a.gate.do(profile, func() (bool, error) {
+		switch a.ask(ctx, profile) {
+		case notify.LoginLater:
+			log.Printf("[SSO] User chose Later for profile '%s'. No new prompt for %v.", profile, loginPause)
+			return true, nil
+		case notify.LoginAbort:
+			return false, ErrLoginAborted
+		}
+		return false, a.login(ctx, profile)
+	})
+}
+
 // initiateLogin starts the AWS SSO login process
 func (a *AuthChecker) initiateLogin(ctx context.Context, profile string) error {
+	ctx, cancel := context.WithTimeout(ctx, loginTimeout)
+	defer cancel()
+
 	args := []string{"sso", "login"}
 
 	if profile != "" {
