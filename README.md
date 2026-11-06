@@ -242,7 +242,7 @@ lazy-ssm runs in the background, and macOS Notification Centre banners from back
 |---|---|---|
 | AWS login | An SSO login has expired | **Later**, **Log in** |
 | `<Tunnel>: cannot connect` | A connection failed. Shows the first failed check and what to change | **Show logs** (opens the log in Console), **OK** |
-| `<Tunnel>: cannot connect` | A tunnel cannot listen on its local port | **Show logs**, **OK** |
+| `<Tunnel>: cannot connect` | A tunnel cannot listen on its local port (another program is using it). Shown once; lazy-ssm keeps trying every 30 seconds and starts the tunnel when the port is free | **Show logs**, **OK** |
 
 Rules that stop pop-ups piling up:
 

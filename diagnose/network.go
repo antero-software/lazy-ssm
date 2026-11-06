@@ -134,6 +134,7 @@ type sgRule struct {
 	SourceGroupIDs   []string
 	CIDRs            []string
 	PrefixLists      bool // the rule has managed prefix list sources
+	IPv6             bool // the rule has IPv6 CIDR sources
 }
 
 // allowsFrom reports whether any rule lets TCP traffic on port in from one of
@@ -189,6 +190,9 @@ type rawPermission struct {
 	PrefixListIds []struct {
 		PrefixListId string `json:"PrefixListId"`
 	} `json:"PrefixListIds"`
+	Ipv6Ranges []struct {
+		CidrIpv6 string `json:"CidrIpv6"`
+	} `json:"Ipv6Ranges"`
 }
 
 func (p rawPermission) rule() sgRule {
@@ -206,6 +210,7 @@ func (p rawPermission) rule() sgRule {
 		r.CIDRs = append(r.CIDRs, c.CidrIp)
 	}
 	r.PrefixLists = len(p.PrefixListIds) > 0
+	r.IPv6 = len(p.Ipv6Ranges) > 0
 	return r
 }
 
@@ -307,10 +312,18 @@ func firewallResult(ctx context.Context, tc config.TunnelConfig, aws awscli.Runn
 	if allowsFrom(rules, tc.RDSPort, inst.SecurityGroupIDs, inst.PrivateIP) {
 		return Result{Check: checkFirewall, Status: Pass}
 	}
+	// Rules lazy-ssm cannot match against the instance: say so, never FAIL.
 	for _, r := range rules {
-		if r.PrefixLists && r.coversPort(tc.RDSPort) {
+		if !r.coversPort(tc.RDSPort) {
+			continue
+		}
+		switch {
+		case r.PrefixLists:
 			return Result{Check: checkFirewall, Status: CouldNotCheck,
 				Message: fmt.Sprintf("A database security group rule for port %d uses a managed prefix list, which lazy-ssm cannot check.", tc.RDSPort)}
+		case r.IPv6:
+			return Result{Check: checkFirewall, Status: CouldNotCheck,
+				Message: fmt.Sprintf("A database security group rule for port %d uses IPv6 ranges, which lazy-ssm cannot check.", tc.RDSPort)}
 		}
 	}
 	return Result{
@@ -359,10 +372,19 @@ func addressResult(ctx context.Context, tc config.TunnelConfig, d Deps, inst ec2
 		}
 		addrs, err := lookupHost(ctx, tc.RDSEndpoint)
 		if err == nil {
+			// Prefer IPv4; fall back to IPv6 when that is all there is.
 			for _, a := range addrs {
 				if p := net.ParseIP(a); p != nil && p.To4() != nil {
 					ip = a
 					break
+				}
+			}
+			if ip == "" {
+				for _, a := range addrs {
+					if net.ParseIP(a) != nil {
+						ip = a
+						break
+					}
 				}
 			}
 		}

@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -459,7 +460,7 @@ func TestCloseTunnel_StopsChildProcesses(t *testing.T) {
 	tun.closeTunnel()
 
 	deadline = time.Now().Add(2 * time.Second)
-	for syscall.Kill(childPID, 0) == nil {
+	for !processGone(childPID) {
 		if time.Now().After(deadline) {
 			syscall.Kill(childPID, syscall.SIGKILL)
 			t.Fatalf("child process %d still running after closeTunnel", childPID)
@@ -653,7 +654,7 @@ func TestUnexpectedExit_StopsLeftoverChildren(t *testing.T) {
 	child := readPID(t, pidFile)
 
 	deadline := time.Now().Add(6 * time.Second)
-	for syscall.Kill(child, 0) == nil {
+	for !processGone(child) {
 		if time.Now().After(deadline) {
 			syscall.Kill(child, syscall.SIGKILL)
 			t.Fatalf("child %d still running after its parent exited", child)
@@ -731,4 +732,71 @@ func TestReportFailure_StrongCauseNeverLostWhenTriggersRace(t *testing.T) {
 			t.Fatalf("iteration %d: problems = %d, want 1 (the plugin failure must always pop up)", i, rec.count())
 		}
 	}
+}
+
+func TestStart_BusyPortIsRetriedWithOnePopUp(t *testing.T) {
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := busy.Addr().(*net.TCPAddr).Port
+
+	cfg := &config.Config{
+		Network:  config.NetworkConfig{ListenAddress: "127.0.0.1", TunnelPortOffset: 1},
+		Timeouts: config.TimeoutConfig{IdleCheck: time.Hour, Shutdown: time.Second, ShutdownPoll: 10 * time.Millisecond},
+	}
+	tun := NewLazySSMTunnel(config.TunnelConfig{Name: "staging-db", Description: "Staging DB", LocalPort: port}, cfg)
+	rec := &problemRecorder{}
+	tun.problem = rec.record
+	tun.listenRetry = 20 * time.Millisecond
+
+	logs := &syncBuffer{}
+	prev := log.Writer()
+	log.SetOutput(logs)
+	defer log.SetOutput(prev)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- tun.Start(ctx) }()
+
+	time.Sleep(200 * time.Millisecond) // several failed attempts
+	select {
+	case err := <-done:
+		t.Fatalf("Start gave up on a busy port: %v", err)
+	default:
+	}
+	if rec.count() != 1 {
+		t.Fatalf("problems = %d, want exactly 1 while the port stays busy", rec.count())
+	}
+	if !strings.Contains(rec.calls[0][2], "lazy-ssm will keep trying every 30 seconds.") {
+		t.Errorf("message = %q", rec.calls[0][2])
+	}
+
+	busy.Close()
+	want := fmt.Sprintf("Listening on port %d", port)
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(logs.String(), want) {
+		if time.Now().After(deadline) {
+			t.Fatal("tunnel never started listening after the port was freed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Start did not return after cancel")
+	}
+}
+
+// processGone reports whether pid has exited. A zombie counts as gone: the
+// tests below check children of a killed process, which the system reaps
+// (on Linux, only if PID 1 reaps orphans). kill(pid, 0) succeeds for zombies,
+// so it cannot be used here.
+func processGone(pid int) bool {
+	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	state := strings.TrimSpace(string(out))
+	return err != nil || state == "" || strings.HasPrefix(state, "Z")
 }

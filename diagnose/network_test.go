@@ -443,3 +443,30 @@ func TestRun_IPv6TargetUsesIPv6Ranges(t *testing.T) {
 		t.Errorf("describe-vpcs query does not ask for IPv6 ranges: %q", aws.calls)
 	}
 }
+
+func TestRun_IPv6OnlyRuleIsCouldNotCheck(t *testing.T) {
+	rules := `[{"IpProtocol":"tcp","FromPort":5432,"ToPort":5432,"UserIdGroupPairs":[],"IpRanges":[],"Ipv6Ranges":[{"CidrIpv6":"2406:da1c:abc::/56"}]}]`
+
+	r := Run(context.Background(), stagingTunnel(), deps(networkAWS(stgBastion, rules)))
+
+	fw, _ := resultFor(r, "Firewall")
+	if fw.Status != CouldNotCheck || fw.Message != "A database security group rule for port 5432 uses IPv6 ranges, which lazy-ssm cannot check." {
+		t.Errorf("Firewall = %+v", fw)
+	}
+	if r.HasFail() {
+		t.Errorf("HasFail = true; an IPv6 rule must not become a firewall failure: %+v", r.Results)
+	}
+}
+
+func TestRun_NonRDSHostnameWithOnlyIPv6(t *testing.T) {
+	tc := stagingTunnel()
+	tc.RDSEndpoint = "redis.example.internal"
+	d := deps(networkAWS(prodBastion, rulesAllowBastion).on("ec2 describe-vpcs", `["10.0.0.0/16", "2406:da1c:abc::/56"]`))
+	d.LookupHost = lookup("2406:da1c:abc::7")
+
+	r := Run(context.Background(), tc, d)
+
+	if addr, _ := resultFor(r, "Address in instance VPC"); addr.Status != Pass {
+		t.Errorf("Address = %+v, want Pass using the IPv6 address", addr)
+	}
+}

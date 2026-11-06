@@ -42,6 +42,8 @@ type LazySSMTunnel struct {
 
 	// problem shows a pop-up the user must act on (notify.Problem in production).
 	problem func(tunnel, title, message string)
+	// listenRetry is how long to wait before trying a busy local port again.
+	listenRetry time.Duration
 	// checkLogin checks the AWS login and asks to log in (sso.CheckProfile in production).
 	checkLogin func(ctx context.Context, cliPath, profile, region string) error
 
@@ -54,6 +56,10 @@ type LazySSMTunnel struct {
 	diagMu        sync.Mutex
 	strongCause   error // a clear failure seen while a quiet one was being checked (guarded by diagMu)
 }
+
+// listenRetryInterval is how often a tunnel tries again to open a local
+// port that another program is using.
+const listenRetryInterval = 30 * time.Second
 
 // processWaitDelay bounds how long Wait waits for output pipes after the SSM
 // process exits (a child such as session-manager-plugin can keep them open).
@@ -80,11 +86,12 @@ func findFreePort(listenAddr string, startPort int) (int, error) {
 // NewLazySSMTunnel creates a new tunnel manager
 func NewLazySSMTunnel(tunnelConfig config.TunnelConfig, appConfig *config.Config) *LazySSMTunnel {
 	t := &LazySSMTunnel{
-		config:     tunnelConfig,
-		appConfig:  appConfig,
-		problem:    notify.Problem,
-		checkLogin: sso.CheckProfile,
-		tunnelPort: tunnelConfig.LocalPort + appConfig.Network.TunnelPortOffset,
+		config:      tunnelConfig,
+		appConfig:   appConfig,
+		problem:     notify.Problem,
+		checkLogin:  sso.CheckProfile,
+		listenRetry: listenRetryInterval,
+		tunnelPort:  tunnelConfig.LocalPort + appConfig.Network.TunnelPortOffset,
 	}
 	t.runDiagnosis = t.defaultDiagnosis
 	return t
@@ -428,10 +435,9 @@ func (t *LazySSMTunnel) copyData(dst, src net.Conn, errCh chan<- error, counter 
 
 // Start begins listening for connections
 func (t *LazySSMTunnel) Start(ctx context.Context) error {
-	listener, err := net.Listen("tcp",
-		net.JoinHostPort(t.appConfig.Network.ListenAddress, strconv.Itoa(t.config.LocalPort)))
+	listener, err := t.listen(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to listen on port %d: %w", t.config.LocalPort, err)
+		return err
 	}
 	defer listener.Close()
 
@@ -467,6 +473,40 @@ func (t *LazySSMTunnel) Start(ctx context.Context) error {
 
 		go t.handleConnection(ctx, conn)
 	}
+}
+
+// listen opens the tunnel's local port. If another program is using it, it
+// shows one pop-up and tries again every listenRetry until the port is free
+// or ctx is cancelled. The service keeps running, so the service manager
+// does not restart it in a loop.
+func (t *LazySSMTunnel) listen(ctx context.Context) (net.Listener, error) {
+	addr := net.JoinHostPort(t.appConfig.Network.ListenAddress, strconv.Itoa(t.config.LocalPort))
+	reported := false
+	for {
+		listener, err := net.Listen("tcp", addr)
+		if err == nil {
+			if reported {
+				log.Printf("[%s] Port %d is free now", t.config.Description, t.config.LocalPort)
+			}
+			return listener, nil
+		}
+		log.Printf("[%s] Cannot listen on port %d: %v. Trying again in %v.", t.config.Description, t.config.LocalPort, err, t.listenRetry)
+		if !reported {
+			t.listenProblem(err)
+			reported = true
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(t.listenRetry):
+		}
+	}
+}
+
+// listenProblem shows a pop-up when a tunnel cannot listen on its local port.
+func (t *LazySSMTunnel) listenProblem(err error) {
+	t.problem(t.config.Name, fmt.Sprintf("%s: cannot connect", t.displayName()),
+		fmt.Sprintf("lazy-ssm cannot listen on local port %d. Another program may be using it. lazy-ssm will keep trying every 30 seconds.\n\n%v", t.config.LocalPort, err))
 }
 
 // shouldCloseIdle reports whether an idle tunnel should be reaped now.
